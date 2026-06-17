@@ -108,9 +108,8 @@ def semantic_search(
         FROM {VEC_TABLE} cv
         JOIN text_chunks tc ON cv.chunk_id = tc.chunk_id
         JOIN reports r ON tc.info_code = r.info_code
-        WHERE cv.embedding MATCH ?
+        WHERE cv.embedding MATCH ? AND k = ?
         ORDER BY cv.distance
-        LIMIT ?
     """
     rows = conn.execute(sql, (vec_str, top_k)).fetchall()
     seen_codes = set()
