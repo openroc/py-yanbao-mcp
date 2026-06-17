@@ -197,7 +197,7 @@ def run_full_index_parallel(conn, num_workers: int = 8, reset: bool = False):
     _save_state({**state, "phase": "pdf_extraction", "total": total_pdf, "done": 0,
                  "workers": num_workers, "last_update": datetime.now().isoformat()})
 
-    batch_size = max(30, len(items) // (num_workers * 40))
+    batch_size = max(10, len(items) // (num_workers * 80))
     n_splits = (len(items) + batch_size - 1) // batch_size
     batches = []
     for i in range(n_splits):
@@ -207,6 +207,7 @@ def run_full_index_parallel(conn, num_workers: int = 8, reset: bool = False):
 
     pdf_ok = 0
     start_time = time.time()
+    _last_heartbeat = start_time
     pool = multiprocessing.Pool(num_workers, initializer=_worker_init)
     async_results = [pool.apply_async(_worker_process_pdf, (b,)) for b in batches]
     pending = set(range(len(async_results)))
@@ -261,6 +262,13 @@ def run_full_index_parallel(conn, num_workers: int = 8, reset: bool = False):
 
             if not pending:
                 break
+            now = time.time()
+            if now - _last_heartbeat >= 120:
+                _last_heartbeat = now
+                elapsed = now - start_time
+                rate = pdf_ok / elapsed if elapsed > 0 else 0
+                logger.info("Still working... %d/%d (%.1f%%)",
+                            pdf_ok, total_pdf, pdf_ok/total_pdf*100)
             time.sleep(0.5)
 
     except KeyboardInterrupt:
