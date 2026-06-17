@@ -247,6 +247,34 @@ def _run_auto_index():
 
 
 @cli.command()
+@click.option("--qps", default=2.0, type=float, help="初始 QPS (默认 2.0)")
+@click.option("--no-index", is_flag=True, help="修复后不自动增量索引")
+def fix(qps, no_index):
+    """重新下载受损 PDF 并重新索引"""
+    d = YanbaoDownloader(max_qps=qps)
+    fixed_codes = d.fix_corrupted()
+    if not fixed_codes:
+        return
+
+    conn = db_module.get_connection()
+    db_module.init_db(conn)
+    for code in fixed_codes:
+        conn.execute("DELETE FROM text_chunks WHERE info_code=?", (code,))
+        conn.execute("UPDATE reports SET page_count=0 WHERE info_code=?", (code,))
+    conn.commit()
+    logger.info("Reset %d reports for re-index", len(fixed_codes))
+    conn.close()
+
+    if not no_index:
+        click.echo("")
+        click.echo(">>> 自动执行增量索引...")
+        conn = db_module.get_connection()
+        db_module.init_db(conn)
+        run_incremental(conn)
+        conn.close()
+
+
+@cli.command()
 def serve():
     from .mcp_server import main as mcp_main
     mcp_main()

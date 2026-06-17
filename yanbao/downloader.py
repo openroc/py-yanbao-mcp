@@ -378,6 +378,46 @@ class YanbaoDownloader:
         self.state.save()
         self._print_summary()
 
+    def fix_corrupted(self) -> list[str]:
+        logger.info("Reading corrupted PDF list: %s", CORRUPTED_PDFS_PATH)
+        entries: list[dict] = []
+        if CORRUPTED_PDFS_PATH.exists():
+            with open(CORRUPTED_PDFS_PATH, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+        if not entries:
+            logger.info("No corrupted PDFs to fix")
+            return []
+
+        logger.info("Found %d corrupted PDFs, attempting re-download...", len(entries))
+        fixed: list[str] = []
+        remaining: list[dict] = []
+        for entry in entries:
+            code = entry.get("code", "")
+            pdf_path_str = entry.get("pdf_path", "")
+            error = entry.get("error", "unknown")
+            logger.info("Re-downloading %s (previous error: %s)", code, error)
+            ok = self.api.download_pdf(code, Path(pdf_path_str))
+            if ok:
+                fixed.append(code)
+                logger.info("  Fixed: %s", code)
+            else:
+                remaining.append(entry)
+                logger.warning("  Still failed: %s", code)
+
+        CORRUPTED_PDFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(CORRUPTED_PDFS_PATH, "w", encoding="utf-8") as f:
+            for entry in remaining:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        logger.info("Fixed %d / %d corrupted PDFs", len(fixed), len(entries))
+        return fixed
+
     def _print_summary(self):
         logger.info("=" * 56)
         logger.info("Download complete")

@@ -197,11 +197,13 @@ def run_full_index_parallel(conn, num_workers: int = 8, reset: bool = False):
     _save_state({**state, "phase": "pdf_extraction", "total": total_pdf, "done": 0,
                  "workers": num_workers, "last_update": datetime.now().isoformat()})
 
-    n_splits = num_workers * 4
-    batches = [[] for _ in range(n_splits)]
-    for i, item in enumerate(items):
-        batches[i % n_splits].append(item)
-    batches = [b for b in batches if b]
+    batch_size = max(30, len(items) // (num_workers * 40))
+    n_splits = (len(items) + batch_size - 1) // batch_size
+    batches = []
+    for i in range(n_splits):
+        start = i * batch_size
+        end = start + batch_size
+        batches.append(items[start:end])
 
     pdf_ok = 0
     start_time = time.time()
