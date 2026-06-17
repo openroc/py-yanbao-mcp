@@ -7,7 +7,7 @@ import httpx
 
 from . import db as db_module
 from . import search as search_module
-from .config import LLM_BASE_URL, LLM_ENABLED, LLM_MODEL, LLM_TIMEOUT
+from .config import LLM_API_KEY, LLM_BASE_URL, LLM_ENABLED, LLM_MODEL, LLM_TIMEOUT
 
 logger = logging.getLogger("yanbao.llm")
 
@@ -47,16 +47,23 @@ class LLMClient:
         base_url: str | None = None,
         model: str | None = None,
         timeout: int | None = None,
+        api_key: str | None = None,
     ):
         self.base_url = (base_url or LLM_BASE_URL).rstrip("/")
         self.model = model or LLM_MODEL or None
         self.timeout = timeout or LLM_TIMEOUT
+        self.api_key = api_key if api_key is not None else (LLM_API_KEY or None)
         self._client: httpx.Client | None = None
 
     @property
     def client(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(base_url=self.base_url, timeout=self.timeout)
+            headers = {}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            self._client = httpx.Client(
+                base_url=self.base_url, timeout=self.timeout, headers=headers
+            )
         return self._client
 
     def chat(self, messages: list[dict], **kwargs) -> str:
@@ -95,11 +102,59 @@ def _check_enabled():
         )
 
 
-def rag_answer(query: str, top_k: int = 8) -> dict[str, Any]:
+def _sort_by_date(results: list[dict]) -> list[dict]:
+    """按报告日期降序排列（最新优先），同日期保序"""
+    return sorted(results, key=lambda r: r.get("report_date", ""), reverse=True)
+
+
+def _hybrid_search(conn, query: str, top_k: int = 20) -> list[dict]:
+    """语义搜索 + 最近报告混合检索, 按日期排序."""
+    semantic_results = search_module.semantic_search(conn, query, top_k=top_k)
+
+    # Only keep results for stocks mentioned in the query
+    query_filtered = []
+    seen = set()
+    for r in semantic_results:
+        name = (r.get("stock") or "").strip()
+        code = r.get("stock_code") or ""
+        if name in query or code in query:
+            query_filtered.append(r)
+            seen.add(r["info_code"])
+    semantic_results = query_filtered
+
+    # Fetch recent reports for the same stocks
+    stocks = set(r.get("stock_code") for r in semantic_results if r.get("stock_code"))
+    for stock_code in stocks:
+        recent = search_module.list_by_stock(conn, stock_code, limit=5)
+        for r in recent:
+            if r["info_code"] not in seen:
+                seen.add(r["info_code"])
+                chunk = conn.execute(
+                    "SELECT chunk_text FROM text_chunks WHERE info_code=? ORDER BY chunk_index LIMIT 1",
+                    (r["info_code"],),
+                ).fetchone()
+                semantic_results.append({
+                    "info_code": r["info_code"],
+                    "title": r["title"],
+                    "stock": r["stock"],
+                    "stock_code": r["stock_code"],
+                    "industry": r["industry"],
+                    "org": r["org"],
+                    "report_date": r["report_date"],
+                    "em_rating": r["em_rating"],
+                    "distance": None,
+                    "chunk_index": 0,
+                    "chunk_text_snippet": chunk["chunk_text"][:300] if chunk else "(无文本)",
+                })
+
+    return _sort_by_date(semantic_results)[:top_k]
+
+
+def rag_answer(query: str, top_k: int = 15) -> dict[str, Any]:
     _check_enabled()
     conn = db_module.get_connection()
     try:
-        results = search_module.semantic_search(conn, query, top_k=top_k)
+        results = _hybrid_search(conn, query, top_k=top_k)
         if not results:
             return {"answer": "未找到相关研报内容。", "citations": []}
         context = _build_context(results)
@@ -141,11 +196,11 @@ def summarize(info_code: str) -> str:
         conn.close()
 
 
-def synthesize(query: str, top_k: int = 10) -> dict[str, Any]:
+def synthesize(query: str, top_k: int = 20) -> dict[str, Any]:
     _check_enabled()
     conn = db_module.get_connection()
     try:
-        results = search_module.semantic_search(conn, query, top_k=top_k)
+        results = _hybrid_search(conn, query, top_k=top_k)
         if not results:
             return {"answer": "未找到相关研报内容。", "citations": []}
         context = _build_context(results)
