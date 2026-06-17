@@ -513,7 +513,7 @@ yanbao index --full --workers 8
 
 ### 语义搜索
 
-基于 `BAAI/bge-small-zh-v1.5` 模型将查询和文本块编码为 384 维向量，余弦距离排序。
+基于 `BAAI/bge-small-zh-v1.5` 模型将查询和文本块编码为 512 维向量，余弦距离排序。
 
 > 注意：语义搜索需要 GPU/CPU 加载嵌入模型。如果 `sentence-transformers` 依赖缺失或模型加载失败，向量阶段会被跳过，语义搜索返回空结果。
 
@@ -540,6 +540,70 @@ yanbao index --full --workers 8
 ### 状态文件
 
 `YANBAO_DATA_DIR/.download_state.json` 记录已下载的研报，避免重复下载。每次完成 20 篇或间隔 10 秒自动保存。
+
+---
+
+## MCP Server
+
+`yanbao serve` 启动 MCP 协议服务端，通过标准输入/输出（stdio）与 MCP 客户端通信。需要在客户端配置中注册。
+
+### 可用工具
+
+| 工具名 | 功能 | 参数 |
+|---------|------|------|
+| `search_reports` | 按条件搜索研报 | query, stock_code, stock_name, industry, org, date_from, date_to, limit |
+| `semantic_search` | 语义搜索研报 | query, top_k |
+| `get_report` | 获取单篇研报详情 | info_code |
+| `list_by_stock` | 获取某股票的全量研报 | stock_code, limit |
+| `list_by_industry` | 获取某行业的研报 | industry, limit |
+| `get_stats` | 获取知识库统计 | 无 |
+
+### opencode 配置
+
+`~/.config/opencode/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "yanbao": {
+      "command": "conda",
+      "args": ["run", "-n", "yanbao", "yanbao", "serve"]
+    }
+  }
+}
+```
+
+### Claude Desktop 配置
+
+`claude_desktop_config.json`（Windows: `%APPDATA%\Claude\claude_desktop_config.json`）:
+
+```json
+{
+  "mcpServers": {
+    "yanbao": {
+      "command": "conda",
+      "args": ["run", "-n", "yanbao", "yanbao", "serve"]
+    }
+  }
+}
+```
+
+### VS Code 配置
+
+VS Code 设置 → Extensions → MCP → 添加 Server：
+
+```json
+{
+  "mcp.servers": {
+    "yanbao": {
+      "command": "conda",
+      "args": ["run", "-n", "yanbao", "yanbao", "serve"]
+    }
+  }
+}
+```
+
+> 注意：如果 `yanbao` 命令不在 PATH 中，`command` 使用完整路径（如 `S:\win-apps\Anaconda3\envs\yanbao\Scripts\yanbao.exe`），或先 `conda activate yanbao` 后用 `python -m yanbao.cli serve`。
 
 ---
 
