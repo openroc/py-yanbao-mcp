@@ -1,6 +1,7 @@
 import json
 import logging
 import multiprocessing
+import os
 import signal
 import sys
 import time
@@ -272,21 +273,17 @@ def run_full_index_parallel(conn, num_workers: int = 8, reset: bool = False):
             time.sleep(0.5)
 
     except KeyboardInterrupt:
+        elapsed = time.time() - start_time
         logger.warning("Received Ctrl+C, terminating workers and saving state...")
         pool.terminate()
-        pool.close()
-        pool.join()
         conn.commit()
-        elapsed = time.time() - start_time
         _save_state({**state, "phase": "interrupted", "total": total_pdf,
                      "done": pdf_ok, "elapsed": round(elapsed, 1),
                      "last_update": datetime.now().isoformat()})
         logger.warning(f"Index interrupted after {pdf_ok}/{total_pdf} PDFs")
-        sys.exit(1)
+        os._exit(1)
     finally:
         pool.terminate()
-        pool.close()
-        pool.join()
 
     conn.commit()
     logger.info(f"PDF extraction done: {pdf_ok} reports ({total_pdf - pdf_ok} skipped/corrupted)")
@@ -332,7 +329,7 @@ def _run_pdf_phase(conn, state, num_workers: int = 1):
         conn.commit()
         _save_state({**state, "phase": "interrupted", "total": total_pdf,
                      "done": pdf_ok, "last_update": datetime.now().isoformat()})
-        sys.exit(1)
+        os._exit(1)
     conn.commit()
     logger.info(f"PDF extraction done: {pdf_ok} reports")
 
@@ -382,7 +379,7 @@ def _run_vector_phase(conn, state):
         conn.commit()
         _save_state({**state, "phase": "interrupted", "note": "vector generation",
                      "last_update": datetime.now().isoformat()})
-        sys.exit(1)
+        os._exit(1)
     except Exception as e:
         logger.warning(f"Vector generation failed: {e}")
     stats = db_module.get_stats(conn)
