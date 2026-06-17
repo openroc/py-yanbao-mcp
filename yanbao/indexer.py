@@ -57,11 +57,20 @@ def index_metadata(conn, records: list[dict], reset: bool = False) -> int:
         ).fetchone()
         page_count = 0 if reset else (existing[0] if existing else 0)
         conn.execute(
-            """INSERT OR REPLACE INTO reports
+            """INSERT INTO reports
                (info_code, title, org, stock, stock_code, industry,
                 em_rating, authors, report_date, report_url, pdf_url,
                 pdf_path, json_path, file_hash, page_count, indexed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(info_code) DO UPDATE SET
+                title=excluded.title, org=excluded.org,
+                stock=excluded.stock, stock_code=excluded.stock_code,
+                industry=excluded.industry, em_rating=excluded.em_rating,
+                authors=excluded.authors, report_date=excluded.report_date,
+                report_url=excluded.report_url, pdf_url=excluded.pdf_url,
+                pdf_path=excluded.pdf_path, json_path=excluded.json_path,
+                file_hash=excluded.file_hash, page_count=excluded.page_count,
+                indexed_at=excluded.indexed_at""",
             (
                 rec["info_code"],
                 rec["title"],
