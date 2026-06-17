@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import click
@@ -12,6 +13,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="repla
 from . import db as db_module
 from . import search as search_module
 from .config import DB_PATH, LOG_LEVEL
+from .downloader import YanbaoDownloader
 from .indexer import run_full_index, run_full_index_parallel, run_incremental, run_metadata_only
 
 logging.basicConfig(
@@ -201,6 +203,47 @@ def stats(json_out):
         click.echo(f"覆盖行业: {s['unique_industries']}")
         click.echo(f"覆盖券商: {s['unique_orgs']}")
         click.echo(f"日期范围: {s['date_range'][0]} ~ {s['date_range'][1]}")
+
+
+@cli.command()
+@click.option("--qps", default=2.0, type=float, help="初始 QPS (默认 2.0)")
+@click.option("--min-qps", default=0.05, type=float, help="退避最低 QPS (默认 0.05)")
+@click.option("--max-pages", default=0, type=int, help="最大页数 (0=不限)")
+@click.option("--page-size", default=50, type=int, help="每页条数 (默认 50)")
+@click.option("--no-index", is_flag=True, help="下载后不自动增量索引")
+def download(qps, min_qps, max_pages, page_size, no_index):
+    """全量下载研报 (从东方财富)"""
+    d = YanbaoDownloader(max_qps=qps, min_qps=min_qps, max_pages=max_pages, page_size=page_size)
+    d.run()
+    if not no_index:
+        _run_auto_index()
+
+
+@cli.command()
+@click.option("--date-from", default="", help="起始日期 (默认昨天, YYYY-MM-DD)")
+@click.option("--date-to", default="", help="结束日期 (默认今天, YYYY-MM-DD)")
+@click.option("--qps", default=2.0, type=float, help="初始 QPS (默认 2.0)")
+@click.option("--no-index", is_flag=True, help="更新后不自动增量索引")
+def update(date_from, date_to, qps, no_index):
+    """增量更新研报 (每日定时执行)"""
+    if not date_to:
+        date_to = datetime.now().strftime("%Y-%m-%d")
+    if not date_from:
+        yesterday = datetime.now() - timedelta(days=1)
+        date_from = yesterday.strftime("%Y-%m-%d")
+    d = YanbaoDownloader(max_qps=qps)
+    d.run(date_from=date_from, date_to=date_to)
+    if not no_index:
+        _run_auto_index()
+
+
+def _run_auto_index():
+    click.echo("")
+    click.echo(">>> 自动执行增量索引...")
+    conn = db_module.get_connection()
+    db_module.init_db(conn)
+    run_incremental(conn)
+    conn.close()
 
 
 @cli.command()

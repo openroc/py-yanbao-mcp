@@ -12,6 +12,7 @@ from .config import CORRUPTED_PDFS_PATH, INDEX_STATE_PATH
 from .extractor import get_page_count, chunk_text, try_extract
 from .scanner import scan_all, find_new_and_changed
 
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 VEC_TABLE = "chunk_vectors"
@@ -204,37 +205,42 @@ def run_full_index_parallel(conn, num_workers: int = 8, reset: bool = False):
 
     pdf_ok = 0
     start_time = time.time()
-    pool = None
+    pool = multiprocessing.Pool(num_workers, initializer=_worker_init)
+    async_results = [pool.apply_async(_worker_process_pdf, (b,)) for b in batches]
+    pending = set(range(len(async_results)))
+
     try:
-        pool = multiprocessing.Pool(num_workers, initializer=_worker_init)
-        for batch_result in pool.imap_unordered(_worker_process_pdf, batches):
-            for result in batch_result:
-                if result[0] == "ok":
-                    _, code, page_count, chunks = result
-                    conn.execute(
-                        "UPDATE reports SET page_count=? WHERE info_code=?",
-                        (page_count, code),
-                    )
-                    if chunks:
-                        cid_start = conn.execute(
-                            "SELECT COALESCE(MAX(chunk_id), 0) + 1 FROM text_chunks"
-                        ).fetchone()[0]
-                        chunk_rows = []
-                        for i, (ct, clen) in enumerate(chunks):
-                            chunk_rows.append((cid_start + i, code, i, ct, clen))
-                        conn.executemany(
-                            "INSERT INTO text_chunks(chunk_id, info_code, chunk_index, chunk_text, token_count) VALUES (?,?,?,?,?)",
-                            chunk_rows,
+        while pending:
+            newly_done = [i for i in pending if async_results[i].ready()]
+            for i in newly_done:
+                pending.remove(i)
+                for result in async_results[i].get():
+                    if result[0] == "ok":
+                        _, code, page_count, chunks = result
+                        conn.execute(
+                            "UPDATE reports SET page_count=? WHERE info_code=?",
+                            (page_count, code),
                         )
-                    pdf_ok += 1
-                elif result[0] == "error":
-                    _, code, pdf_path, err = result
-                    logger.warning(f"Corrupted PDF: {pdf_path} ({err})")
-                    conn.execute(
-                        "UPDATE reports SET page_count=-1 WHERE info_code=?",
-                        (code,),
-                    )
-                    _log_corrupted_pdf(code, pdf_path, err)
+                        if chunks:
+                            cid_start = conn.execute(
+                                "SELECT COALESCE(MAX(chunk_id), 0) + 1 FROM text_chunks"
+                            ).fetchone()[0]
+                            chunk_rows = []
+                            for i, (ct, clen) in enumerate(chunks):
+                                chunk_rows.append((cid_start + i, code, i, ct, clen))
+                            conn.executemany(
+                                "INSERT INTO text_chunks(chunk_id, info_code, chunk_index, chunk_text, token_count) VALUES (?,?,?,?,?)",
+                                chunk_rows,
+                            )
+                        pdf_ok += 1
+                    elif result[0] == "error":
+                        _, code, pdf_path, err = result
+                        logger.warning(f"Corrupted PDF: {pdf_path} ({err})")
+                        conn.execute(
+                            "UPDATE reports SET page_count=-1 WHERE info_code=?",
+                            (code,),
+                        )
+                        _log_corrupted_pdf(code, pdf_path, err)
 
                 if pdf_ok % 50 == 0:
                     conn.commit()
@@ -250,12 +256,16 @@ def run_full_index_parallel(conn, num_workers: int = 8, reset: bool = False):
                                  "done": pdf_ok, "rate": round(rate, 1),
                                  "eta_min": round(remaining / 60, 1),
                                  "last_update": datetime.now().isoformat()})
+
+            if not pending:
+                break
+            time.sleep(0.5)
+
     except KeyboardInterrupt:
         logger.warning("Received Ctrl+C, terminating workers and saving state...")
-        if pool:
-            pool.terminate()
-            pool.close()
-            pool.join()
+        pool.terminate()
+        pool.close()
+        pool.join()
         conn.commit()
         elapsed = time.time() - start_time
         _save_state({**state, "phase": "interrupted", "total": total_pdf,
@@ -264,9 +274,9 @@ def run_full_index_parallel(conn, num_workers: int = 8, reset: bool = False):
         logger.warning(f"Index interrupted after {pdf_ok}/{total_pdf} PDFs")
         sys.exit(1)
     finally:
-        if pool:
-            pool.close()
-            pool.join()
+        pool.terminate()
+        pool.close()
+        pool.join()
 
     conn.commit()
     logger.info(f"PDF extraction done: {pdf_ok} reports ({total_pdf - pdf_ok} skipped/corrupted)")
@@ -339,10 +349,12 @@ def _run_vector_phase(conn, state):
                      "done": 0, "last_update": datetime.now().isoformat()})
         vec_ok = 0
         start_time = time.time()
-        for row in to_vec:
+        for idx, row in enumerate(to_vec):
             n = index_vectors(conn, row["info_code"])
             if n > 0:
                 vec_ok += 1
+            if idx % 5 == 0:
+                time.sleep(0.001)
             if vec_ok % 50 == 0 and vec_ok > 0:
                 conn.commit()
                 elapsed = time.time() - start_time
@@ -355,6 +367,12 @@ def _run_vector_phase(conn, state):
                              "eta_min": round(remaining / 60, 1),
                              "last_update": datetime.now().isoformat()})
         logger.info(f"Vector generation done: {vec_ok} reports")
+    except KeyboardInterrupt:
+        logger.warning("Received Ctrl+C during vector generation, exiting...")
+        conn.commit()
+        _save_state({**state, "phase": "interrupted", "note": "vector generation",
+                     "last_update": datetime.now().isoformat()})
+        sys.exit(1)
     except Exception as e:
         logger.warning(f"Vector generation failed: {e}")
     stats = db_module.get_stats(conn)
