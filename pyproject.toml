@@ -1,0 +1,20 @@
+[project]
+name = "yanbao-mcp"
+version = "0.1.0"
+description = "研报知识库 - 元数据检索 + 语义搜索 + MCP Server"
+requires-python = ">=3.10"
+dependencies = [
+    "sentence-transformers>=3.0.0",
+    "mcp>=1.0.0",
+    "pypdf>=4.0.0",
+    "chardet>=5.0.0",
+    "click>=8.0.0",
+    "numpy>=1.24.0",
+    "sqlite-vec>=0.1.0",
+]
+
+[project.scripts]
+yanbao = "yanbao.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
