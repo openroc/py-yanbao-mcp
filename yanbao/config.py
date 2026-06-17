@@ -15,7 +15,10 @@ def _load_env():
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
-                env[k.strip()] = v.strip()
+                k = k.strip()
+                v = v.strip()
+                env[k] = v
+                os.environ.setdefault(k, v)
     return env
 
 
