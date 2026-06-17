@@ -18,11 +18,15 @@ def extract_text(pdf_path: str | Path) -> str | None:
         for page in reader.pages:
             text = page.extract_text()
             if text:
-                pages.append(text)
+                pages.append(_clean(text))
         return "\n".join(pages) if pages else None
     except Exception as e:
         logger.warning(f"Failed to extract PDF {path.name}: {e}")
         return None
+
+
+def _clean(text: str) -> str:
+    return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def try_extract(pdf_path: str | Path) -> tuple[str | None, str | None]:
@@ -35,7 +39,7 @@ def try_extract(pdf_path: str | Path) -> tuple[str | None, str | None]:
         for page in reader.pages:
             text = page.extract_text()
             if text:
-                pages.append(text)
+                pages.append(_clean(text))
         if not pages:
             return None, "no text extracted"
         return "\n".join(pages), None
