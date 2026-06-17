@@ -276,8 +276,8 @@ def fix(qps, no_index):
 
 @cli.command()
 def serve():
-    from .mcp_server import main as mcp_main
-    mcp_main()
+    from .mcp_server import run as mcp_run
+    mcp_run()
 
 
 def _output(results: list, json_out: bool):
