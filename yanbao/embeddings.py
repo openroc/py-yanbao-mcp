@@ -25,6 +25,21 @@ def _load_model():
     try:
         from sentence_transformers import SentenceTransformer
         logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
+        _model = SentenceTransformer(
+            EMBEDDING_MODEL,
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+        logger.info("Model loaded (from cache)")
+        return _model
+    except OSError:
+        logger.info("Model not in cache, downloading...")
+    except Exception as e:
+        logger.warning(f"Embedding model failed to load: {e}. Vector search disabled.")
+        _model_available = False
+        return None
+    try:
+        from sentence_transformers import SentenceTransformer
         _model = SentenceTransformer(EMBEDDING_MODEL, trust_remote_code=True)
         logger.info("Model loaded")
         return _model

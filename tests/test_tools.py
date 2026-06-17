@@ -119,7 +119,8 @@ def test_mcp_smoke():
     import json, subprocess
     proc = subprocess.Popen(
         [sys.executable, "-m", "yanbao.cli", "serve"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         cwd=str(Path(__file__).resolve().parent.parent),
     )
 
@@ -153,7 +154,18 @@ def test_mcp_smoke():
         if line.lower().startswith("content-length:"):
             length = int(line.split(":")[1].strip())
 
-    body = proc.stdout.read(length) if length else b""
+    body = b""
+    if length:
+        import threading
+        def _read():
+            nonlocal body
+            body = proc.stdout.read(length)
+        t = threading.Thread(target=_read, daemon=True)
+        t.start()
+        t.join(timeout=5)
+        if t.is_alive():
+            proc.kill()
+            return "FAIL: body read timeout"
     proc.terminate()
     result = json.loads(body.decode())
     assert result.get("id") == 1
@@ -164,8 +176,12 @@ if __name__ == "__main__":
     run_mcp = "--mcp" in sys.argv
 
     tests = [
-        test_search_reports, test_semantic_search, test_get_report,
-        test_list_by_stock, test_list_by_industry, test_get_stats,
+        test_semantic_search,
+        test_search_reports,  
+        test_get_report,
+        test_list_by_stock, 
+        test_list_by_industry, 
+        test_get_stats,
     ]
     if run_mcp:
         tests.append(test_mcp_smoke)

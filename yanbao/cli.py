@@ -280,6 +280,72 @@ def serve():
     mcp_run()
 
 
+@cli.command()
+@click.argument("query")
+@click.option("--top-k", default=8, type=int, help="检索相关片段数")
+def chat(query, top_k):
+    """基于研报知识库问答"""
+    from . import llm as llm_module
+    try:
+        result = llm_module.rag_answer(query, top_k=top_k)
+    except RuntimeError as e:
+        click.echo(f"错误: {e}")
+        return
+    except Exception as e:
+        click.echo(f"LLM 调用失败: {e}")
+        return
+    click.echo(result["answer"])
+    if result.get("citations"):
+        click.echo("\n--- 参考来源 ---")
+        for r in result["citations"]:
+            click.echo(
+                f"  [{r.get('report_date','')}] {r.get('org','')} | "
+                f"{r.get('stock','')}({r.get('stock_code','')}) | "
+                f"{r.get('title','')[:60]}"
+            )
+
+
+@cli.command()
+@click.argument("info_code")
+def summary(info_code):
+    """摘要单篇研报"""
+    from . import llm as llm_module
+    try:
+        result = llm_module.summarize(info_code)
+    except RuntimeError as e:
+        click.echo(f"错误: {e}")
+        return
+    except Exception as e:
+        click.echo(f"LLM 调用失败: {e}")
+        return
+    click.echo(result)
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--top-k", default=10, type=int, help="检索相关片段数")
+def analyze(query, top_k):
+    """多研报综合分析"""
+    from . import llm as llm_module
+    try:
+        result = llm_module.synthesize(query, top_k=top_k)
+    except RuntimeError as e:
+        click.echo(f"错误: {e}")
+        return
+    except Exception as e:
+        click.echo(f"LLM 调用失败: {e}")
+        return
+    click.echo(result["answer"])
+    if result.get("citations"):
+        click.echo("\n--- 参考来源 ---")
+        for r in result["citations"]:
+            click.echo(
+                f"  [{r.get('report_date','')}] {r.get('org','')} | "
+                f"{r.get('stock','')}({r.get('stock_code','')}) | "
+                f"{r.get('title','')[:60]}"
+            )
+
+
 def _output(results: list, json_out: bool):
     if json_out:
         click.echo(json.dumps(results, ensure_ascii=False, indent=2))

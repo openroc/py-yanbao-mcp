@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import sys
 
-import mcp.server.stdio
+import anyio
 import mcp.types as types
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
+from mcp.shared.message import SessionMessage
 
 from . import db as db_module
+from . import llm as llm_module
 from . import search as search_module
 
 logger = logging.getLogger("yanbao-mcp")
@@ -91,6 +95,22 @@ async def handle_list_tools() -> list[types.Tool]:
             description="获取知识库统计信息",
             inputSchema={"type": "object", "properties": {}},
         ),
+        types.Tool(
+            name="ask",
+            description="基于研报知识库问答（自然语言提问，LLM 生成回答）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "自然语言问题"},
+                    "top_k": {
+                        "type": "integer",
+                        "description": "检索相关片段数",
+                        "default": 8,
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
     ]
 
 
@@ -155,6 +175,27 @@ async def handle_call_tool(
             )
             return [types.TextContent(type="text", text=text)]
 
+        elif name == "ask":
+            args = arguments or {}
+            query = args.get("query", "")
+            top_k = args.get("top_k", 8)
+            try:
+                result = llm_module.rag_answer(query, top_k=top_k)
+            except RuntimeError as e:
+                return [types.TextContent(type="text", text=f"LLM 未启用: {e}")]
+            except Exception as e:
+                return [types.TextContent(type="text", text=f"LLM 调用失败: {e}")]
+            text = result["answer"]
+            if result.get("citations"):
+                text += "\n\n--- 参考来源 ---\n"
+                for r in result["citations"]:
+                    text += (
+                        f"[{r.get('report_date','')}] {r.get('org','')} | "
+                        f"{r.get('stock','')}({r.get('stock_code','')}) | "
+                        f"{r.get('title','')[:60]}\n"
+                    )
+            return [types.TextContent(type="text", text=text)]
+
         else:
             raise ValueError(f"Unknown tool: {name}")
     finally:
@@ -212,7 +253,43 @@ def _fmt_report(r: dict) -> str:
 
 
 async def main():
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+    loop = asyncio.get_event_loop()
+
+    read_send, read_stream = anyio.create_memory_object_stream(256)
+    write_stream, write_recv = anyio.create_memory_object_stream(256)
+
+    async def stdin_reader():
+        try:
+            while True:
+                line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
+                if not line:
+                    break
+                try:
+                    msg = types.JSONRPCMessage.model_validate_json(line.strip())
+                except Exception as exc:
+                    await read_send.send(exc)
+                    continue
+                await read_send.send(SessionMessage(msg))
+        finally:
+            await read_send.aclose()
+
+    async def stdout_writer():
+        try:
+            while True:
+                session_msg = await write_recv.receive()
+                json_str = session_msg.message.model_dump_json(
+                    by_alias=True, exclude_none=True
+                )
+                data = (json_str + "\n").encode()
+                await loop.run_in_executor(None, sys.stdout.buffer.write, data)
+                await loop.run_in_executor(None, sys.stdout.buffer.flush)
+        except anyio.EndOfStream:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(stdin_reader)
+        tg.start_soon(stdout_writer)
+
         await server.run(
             read_stream,
             write_stream,
@@ -226,7 +303,19 @@ async def main():
             ),
         )
 
+        # Signal writer to stop after server.run() exits
+        await write_send.aclose()
+
 
 def run():
-    import asyncio
-    asyncio.run(main())
+    import os
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    except asyncio.CancelledError:
+        pass
+
+    # Force exit to prevent hanging on executor threads (sentence_transformers)
+    os._exit(0)

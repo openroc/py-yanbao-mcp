@@ -41,5 +41,9 @@ LOG_LEVEL = _get("YANBAO_LOG_LEVEL", "INFO")
 CORRUPTED_PDFS_PATH = Path(
     _get("YANBAO_CORRUPTED_PDFS", str(PROJECT_DIR / "data" / "corrupted_pdfs.jsonl"))
 )
+LLM_ENABLED = _get("YANBAO_LLM_ENABLED", "true").lower() == "true"
+LLM_BASE_URL = _get("YANBAO_LLM_BASE_URL", "http://localhost:8080/v1")
+LLM_MODEL = _get("YANBAO_LLM_MODEL", "")
+LLM_TIMEOUT = int(_get("YANBAO_LLM_TIMEOUT", "60"))
 EMBEDDING_DIM = 512
 VEC_TABLE_NAME = "chunk_vectors"
