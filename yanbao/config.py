@@ -41,5 +41,5 @@ LOG_LEVEL = _get("YANBAO_LOG_LEVEL", "INFO")
 CORRUPTED_PDFS_PATH = Path(
     _get("YANBAO_CORRUPTED_PDFS", str(PROJECT_DIR / "data" / "corrupted_pdfs.jsonl"))
 )
-EMBEDDING_DIM = 384
+EMBEDDING_DIM = 512
 VEC_TABLE_NAME = "chunk_vectors"
