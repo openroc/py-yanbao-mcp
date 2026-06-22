@@ -111,16 +111,7 @@ def _hybrid_search(conn, query: str, top_k: int = 20) -> list[dict]:
     """语义搜索 + 最近报告混合检索, 按日期排序."""
     semantic_results = search_module.semantic_search(conn, query, top_k=top_k)
 
-    # Only keep results for stocks mentioned in the query
-    query_filtered = []
-    seen = set()
-    for r in semantic_results:
-        name = (r.get("stock") or "").strip()
-        code = r.get("stock_code") or ""
-        if name in query or code in query:
-            query_filtered.append(r)
-            seen.add(r["info_code"])
-    semantic_results = query_filtered
+    seen = set(r["info_code"] for r in semantic_results)
 
     # Fetch recent reports for the same stocks
     stocks = set(r.get("stock_code") for r in semantic_results if r.get("stock_code"))

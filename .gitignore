@@ -9,3 +9,8 @@ data/*.db
 data/*.db-*
 data/*.jsonl
 *.log
+
+.qwen/
+.claude/
+.vscode/
+.roo/
