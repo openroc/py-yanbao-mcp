@@ -48,3 +48,5 @@ LLM_TIMEOUT = int(_get("YANBAO_LLM_TIMEOUT", "60"))
 LLM_API_KEY = _get("YANBAO_LLM_API_KEY", "")
 EMBEDDING_DIM = 512
 VEC_TABLE_NAME = "chunk_vectors"
+FACTOR_VEC_TABLE_NAME = "factor_vectors"
+FACTOR_TYPES = ["产能", "订单", "报价", "增速", "政策", "成本", "库存", "销量"]

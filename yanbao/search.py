@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from .db import get_connection
-from .config import VEC_TABLE_NAME
+from .config import VEC_TABLE_NAME, FACTOR_VEC_TABLE_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -194,3 +194,143 @@ def search_hybrid(
             "distance": None,
         })
     return merged[:top_k]
+
+
+def search_factors(
+    conn,
+    factor_type: str | None = None,
+    min_value: float | None = None,
+    max_value: float | None = None,
+    unit: str | None = None,
+    info_code: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """
+    按因子类型和数值范围搜索因子
+
+    Args:
+        conn: 数据库连接
+        factor_type: 因子类型 (产能/订单/报价/增速/政策/成本/库存/销量)
+        min_value: 最小值
+        max_value: 最大值
+        unit: 单位
+        info_code: 限定研报
+        limit: 返回数量
+    """
+    conditions = []
+    params = []
+
+    if factor_type:
+        conditions.append("f.factor_type = ?")
+        params.append(factor_type)
+
+    if min_value is not None:
+        conditions.append("f.value >= ?")
+        params.append(min_value)
+
+    if max_value is not None:
+        conditions.append("f.value <= ?")
+        params.append(max_value)
+
+    if unit:
+        conditions.append("f.unit = ?")
+        params.append(unit)
+
+    if info_code:
+        conditions.append("fc.info_code = ?")
+        params.append(info_code)
+
+    sql = """
+        SELECT f.factor_id, f.factor_type, f.factor_name, f.value, f.unit,
+               f.source_text, fc.info_code, r.title, r.stock, r.stock_code,
+               r.org, r.report_date
+        FROM factors f
+        JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
+        JOIN reports r ON fc.info_code = r.info_code
+    """
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY f.value DESC LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def semantic_factor_search(
+    conn, query: str, factor_type: str | None = None, top_k: int = 10
+) -> list[dict]:
+    """
+    语义搜索因子（向量相似度）
+
+    Args:
+        conn: 数据库连接
+        query: 自然语言查询
+        factor_type: 可选的因子类型过滤
+        top_k: 返回数量
+    """
+    from .embeddings import encode
+
+    query_vec = encode([query])[0]
+    vec_str = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
+
+    factor_vec_table = FACTOR_VEC_TABLE_NAME
+
+    if factor_type:
+        sql = f"""
+            SELECT fv.factor_id, fv.distance, f.factor_type, f.factor_name,
+                   f.value, f.unit, f.source_text, fc.info_code,
+                   r.title, r.stock, r.stock_code, r.org, r.report_date
+            FROM {factor_vec_table} fv
+            JOIN factors f ON fv.factor_id = f.factor_id
+            JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
+            JOIN reports r ON fc.info_code = r.info_code
+            WHERE fv.embedding MATCH ? AND k = ? AND f.factor_type = ?
+            ORDER BY fv.distance
+        """
+        rows = conn.execute(sql, (vec_str, top_k, factor_type)).fetchall()
+    else:
+        sql = f"""
+            SELECT fv.factor_id, fv.distance, f.factor_type, f.factor_name,
+                   f.value, f.unit, f.source_text, fc.info_code,
+                   r.title, r.stock, r.stock_code, r.org, r.report_date
+            FROM {factor_vec_table} fv
+            JOIN factors f ON fv.factor_id = f.factor_id
+            JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
+            JOIN reports r ON fc.info_code = r.info_code
+            WHERE fv.embedding MATCH ? AND k = ?
+            ORDER BY fv.distance
+        """
+        rows = conn.execute(sql, (vec_str, top_k)).fetchall()
+
+    results = []
+    for r in rows:
+        results.append({
+            "factor_id": r["factor_id"],
+            "factor_type": r["factor_type"],
+            "factor_name": r["factor_name"],
+            "value": r["value"],
+            "unit": r["unit"],
+            "source_text": r["source_text"],
+            "info_code": r["info_code"],
+            "title": r["title"],
+            "stock": r["stock"],
+            "stock_code": r["stock_code"],
+            "org": r["org"],
+            "report_date": r["report_date"],
+            "distance": round(r["distance"], 4),
+        })
+    return results
+
+
+def get_factors_by_report(conn, info_code: str) -> list[dict]:
+    """获取某研报的所有因子"""
+    rows = conn.execute("""
+        SELECT f.factor_id, f.factor_type, f.factor_name, f.value, f.unit,
+               f.source_text, fc.chunk_text
+        FROM factors f
+        JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
+        WHERE fc.info_code = ?
+        ORDER BY f.factor_type, f.value DESC
+    """, (info_code,)).fetchall()
+    return [dict(r) for r in rows]

@@ -111,6 +111,50 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["query"],
             },
         ),
+        types.Tool(
+            name="search_factors",
+            description="搜索结构化因子（按类型/数值范围过滤）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "factor_type": {
+                        "type": "string",
+                        "description": "因子类型：产能/订单/报价/增速/政策/成本/库存/销量",
+                    },
+                    "min_value": {"type": "number", "description": "最小值"},
+                    "max_value": {"type": "number", "description": "最大值"},
+                    "unit": {"type": "string", "description": "单位"},
+                    "limit": {"type": "integer", "description": "返回数量", "default": 50},
+                },
+            },
+        ),
+        types.Tool(
+            name="semantic_factor_search",
+            description="语义搜索因子（自然语言找相关因子）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "自然语言查询"},
+                    "factor_type": {
+                        "type": "string",
+                        "description": "可选的因子类型过滤",
+                    },
+                    "top_k": {"type": "integer", "description": "返回数量", "default": 10},
+                },
+                "required": ["query"],
+            },
+        ),
+        types.Tool(
+            name="get_report_factors",
+            description="获取某研报的所有结构化因子",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "info_code": {"type": "string", "description": "研报infoCode"},
+                },
+                "required": ["info_code"],
+            },
+        ),
     ]
 
 
@@ -196,6 +240,35 @@ async def handle_call_tool(
                     )
             return [types.TextContent(type="text", text=text)]
 
+        elif name == "search_factors":
+            args = arguments or {}
+            results = search_module.search_factors(
+                conn,
+                factor_type=args.get("factor_type"),
+                min_value=args.get("min_value"),
+                max_value=args.get("max_value"),
+                unit=args.get("unit"),
+                limit=args.get("limit", 50),
+            )
+            return [types.TextContent(type="text", text=_fmt_factor(results))]
+
+        elif name == "semantic_factor_search":
+            args = arguments or {}
+            results = search_module.semantic_factor_search(
+                conn,
+                query=args["query"],
+                factor_type=args.get("factor_type"),
+                top_k=args.get("top_k", 10),
+            )
+            return [types.TextContent(type="text", text=_fmt_factor(results))]
+
+        elif name == "get_report_factors":
+            info_code = arguments.get("info_code", "")
+            results = search_module.get_factors_by_report(conn, info_code)
+            if not results:
+                return [types.TextContent(type="text", text="该研报暂无因子数据")]
+            return [types.TextContent(type="text", text=_fmt_factor(results))]
+
         else:
             raise ValueError(f"Unknown tool: {name}")
     finally:
@@ -248,6 +321,35 @@ def _fmt_report(r: dict) -> str:
     for c in r.get("chunks", []):
         lines.append(f"[第{c['chunk_index']}段]")
         lines.append(c["chunk_text"][:500])
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _fmt_factor(results: list[dict]) -> str:
+    if not results:
+        return "无结果"
+    lines = []
+    current_code = None
+    for r in results:
+        code = r.get("info_code", "")
+        if code != current_code:
+            current_code = code
+            lines.append("=" * 60)
+            lines.append(
+                f"[{r.get('report_date','')}] {r.get('org','')} | "
+                f"{r.get('stock','')}({r.get('stock_code','')})"
+            )
+            lines.append(f"研报: {r.get('title','')[:70]}")
+            lines.append("")
+        # 因子行
+        ftype = r.get("factor_type", "")
+        fname = r.get("factor_name", "")
+        value = r.get("value", "")
+        unit = r.get("unit", "")
+        lines.append(f"  【{ftype}】{fname}: {value} {unit}")
+        src = r.get("source_text", "")
+        if src:
+            lines.append(f"    → {src[:100]}")
         lines.append("")
     return "\n".join(lines)
 

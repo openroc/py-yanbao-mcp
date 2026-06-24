@@ -2,7 +2,7 @@ import sqlite3
 import sqlite_vec
 from pathlib import Path
 
-from .config import DB_PATH, VEC_TABLE_NAME, EMBEDDING_DIM
+from .config import DB_PATH, VEC_TABLE_NAME, EMBEDDING_DIM, FACTOR_VEC_TABLE_NAME
 
 
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
@@ -69,6 +69,42 @@ def init_db(conn: sqlite3.Connection):
     _sync_fts_triggers(conn)
 
 
+def init_factor_tables(conn: sqlite3.Connection):
+    """初始化因子相关表"""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS factor_chunks (
+            chunk_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            info_code   TEXT NOT NULL REFERENCES reports(info_code) ON DELETE CASCADE,
+            chunk_text  TEXT NOT NULL,
+            indexed_at  TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS factors (
+            factor_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            chunk_id    INTEGER NOT NULL REFERENCES factor_chunks(chunk_id) ON DELETE CASCADE,
+            factor_type TEXT NOT NULL,
+            factor_name TEXT NOT NULL,
+            value       REAL,
+            unit        TEXT,
+            source_text TEXT,
+            created_at  TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_factors_info ON factors(chunk_id);
+        CREATE INDEX IF NOT EXISTS idx_factors_type ON factors(factor_type);
+        CREATE INDEX IF NOT EXISTS idx_factors_value ON factors(value);
+    """)
+
+    # 向量表
+    factor_vec_table = FACTOR_VEC_TABLE_NAME
+    conn.execute(f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS {factor_vec_table} USING vec0(
+            factor_id INTEGER PRIMARY KEY,
+            embedding float[{EMBEDDING_DIM}] distance_metric=cosine
+        );
+    """)
+
+
 def _sync_fts_triggers(conn: sqlite3.Connection):
     conn.executescript("""
         CREATE TRIGGER IF NOT EXISTS reports_ai AFTER INSERT ON reports BEGIN
@@ -106,4 +142,19 @@ def get_stats(conn: sqlite3.Connection) -> dict:
         "unique_industries": industries,
         "unique_orgs": orgs,
         "date_range": (date_range[0], date_range[1]) if date_range else None,
+    }
+
+
+def get_factor_stats(conn: sqlite3.Connection) -> dict:
+    """获取因子统计信息"""
+    total = conn.execute("SELECT COUNT(*) FROM factors").fetchone()[0]
+    by_type = {}
+    for ftype in ["产能", "订单", "报价", "增速", "政策", "成本", "库存", "销量"]:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM factors WHERE factor_type = ?", (ftype,)
+        ).fetchone()[0]
+        by_type[ftype] = count
+    return {
+        "total_factors": total,
+        "factors_by_type": by_type,
     }

@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import db as db_module
-from .config import CORRUPTED_PDFS_PATH, INDEX_STATE_PATH
+from .config import CORRUPTED_PDFS_PATH, INDEX_STATE_PATH, FACTOR_VEC_TABLE_NAME
 from .extractor import get_page_count, chunk_text, try_extract
 from .scanner import scan_all, find_new_and_changed
 
@@ -173,6 +173,7 @@ def run_full_index(conn, reset: bool = False):
     logger.info(f"Metadata phase done: {meta_inserted} records")
     _run_pdf_phase(conn, state, 1)
     _run_vector_phase(conn, state)
+    _run_factor_phase(conn, state)
 
 
 def _log_corrupted_pdf(code: str, pdf_path: str, error: str):
@@ -298,6 +299,7 @@ def run_full_index_parallel(conn, num_workers: int = 8, reset: bool = False):
     logger.info(f"PDF extraction done: {pdf_ok} reports ({total_pdf - pdf_ok} skipped/corrupted)")
 
     _run_vector_phase(conn, state)
+    _run_factor_phase(conn, state)
 
 
 def _run_pdf_phase(conn, state, num_workers: int = 1):
@@ -416,4 +418,149 @@ def run_incremental(conn):
             n = index_pdf_content(conn, code, rec["pdf_path"])
             if n > 0:
                 index_vectors(conn, code)
+                index_factors(conn, code)
     logger.info(f"Incremental index done: {len(all_to_process)} reports")
+
+
+def index_factors(conn, info_code: str) -> int:
+    """从文本块中提取因子"""
+    from .factor_extractor import extract_factors_from_text
+
+    rows = conn.execute(
+        "SELECT chunk_id, chunk_text FROM text_chunks WHERE info_code=? ORDER BY chunk_index",
+        (info_code,),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    # 合并所有文本块进行因子提取
+    full_text = "\n\n".join(r["chunk_text"] for r in rows)
+    factors = extract_factors_from_text(full_text)
+
+    if not factors:
+        return 0
+
+    # 获取当前 chunk_id 最大值
+    chunk_id_start = conn.execute(
+        "SELECT COALESCE(MAX(chunk_id), 0) + 1 FROM factor_chunks"
+    ).fetchone()[0]
+
+    # 插入 factor_chunks
+    now = datetime.now().isoformat()
+    fc_data = [(chunk_id_start, info_code, full_text[:5000], now)]
+    conn.executemany(
+        "INSERT INTO factor_chunks(chunk_id, info_code, chunk_text, indexed_at) VALUES (?,?,?,?)",
+        fc_data,
+    )
+
+    # 插入 factors
+    factor_data = []
+    for f in factors:
+        factor_data.append((
+            chunk_id_start,
+            f["factor_type"],
+            f["factor_name"],
+            f["value"],
+            f["unit"],
+            f["source_text"],
+            now,
+        ))
+    conn.executemany(
+        """INSERT INTO factors(chunk_id, factor_type, factor_name, value, unit, source_text, created_at)
+           VALUES (?,?,?,?,?,?,?)""",
+        factor_data,
+    )
+    conn.commit()
+    return len(factors)
+
+
+def index_factor_vectors(conn, info_code: str) -> int:
+    """为因子生成向量"""
+    from .embeddings import encode
+
+    rows = conn.execute(
+        """SELECT f.factor_id, f.source_text
+           FROM factors f
+           JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
+           WHERE fc.info_code = ?""",
+        (info_code,),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    factor_ids = [r["factor_id"] for r in rows]
+    texts = [r["source_text"] for r in rows]
+
+    embeddings = encode(texts)
+    if len(embeddings) == 0:
+        return 0
+
+    vec_table = FACTOR_VEC_TABLE_NAME
+    vec_data = []
+    for fid, emb in zip(factor_ids, embeddings):
+        vec_str = "[" + ",".join(f"{v:.6f}" for v in emb) + "]"
+        vec_data.append((fid, vec_str))
+    conn.executemany(
+        f"INSERT INTO {vec_table}(factor_id, embedding) VALUES (?,?)", vec_data
+    )
+    conn.commit()
+    return len(rows)
+
+
+def _run_factor_phase(conn, state):
+    """运行因子提取阶段"""
+    logger.info("Starting factor extraction phase...")
+    _save_state({**state, "phase": "factor_extraction", "last_update": datetime.now().isoformat()})
+
+    # 获取需要提取因子的报告
+    to_factor = conn.execute(
+        """SELECT DISTINCT tc.info_code
+           FROM text_chunks tc
+           LEFT JOIN factor_chunks fc ON tc.info_code = fc.info_code
+           WHERE fc.chunk_id IS NULL"""
+    ).fetchall()
+
+    total = len(to_factor)
+    logger.info(f"Factor extraction needed for {total} reports")
+
+    if total == 0:
+        logger.info("No factors to extract")
+        return
+
+    _save_state({**state, "phase": "factor_extraction", "total": total,
+                 "done": 0, "last_update": datetime.now().isoformat()})
+
+    factor_ok = 0
+    start_time = time.time()
+    try:
+        for idx, row in enumerate(to_factor):
+            n = index_factors(conn, row["info_code"])
+            if n > 0:
+                factor_ok += 1
+            # 同时生成因子向量
+            index_factor_vectors(conn, row["info_code"])
+
+            if factor_ok % 20 == 0 and factor_ok > 0:
+                conn.commit()
+                elapsed = time.time() - start_time
+                rate = factor_ok / elapsed * 60
+                remaining = (total - factor_ok) / (factor_ok / elapsed) if factor_ok > 0 else 0
+                progress = factor_ok / total * 100
+                logger.info(f"Factors: {factor_ok}/{total} ({progress:.1f}%) [{rate:.0f}/min, est {remaining/60:.0f}min]")
+                _save_state({**state, "phase": "factor_extraction", "total": total,
+                             "done": factor_ok, "rate": round(rate, 1),
+                             "eta_min": round(remaining / 60, 1),
+                             "last_update": datetime.now().isoformat()})
+        logger.info(f"Factor extraction done: {factor_ok} reports")
+    except KeyboardInterrupt:
+        logger.warning("Received Ctrl+C during factor extraction, exiting...")
+        conn.commit()
+        _save_state({**state, "phase": "interrupted", "note": "factor extraction",
+                     "last_update": datetime.now().isoformat()})
+        os._exit(1)
+    except Exception as e:
+        logger.warning(f"Factor extraction failed: {e}")
+
+    conn.commit()
+    stats = db_module.get_factor_stats(conn)
+    logger.info(f"Factor stats: {stats}")
