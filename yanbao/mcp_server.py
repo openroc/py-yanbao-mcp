@@ -162,8 +162,9 @@ async def handle_list_tools() -> list[types.Tool]:
 async def handle_call_tool(
     name: str, arguments: dict | None
 ) -> list[types.TextContent]:
-    conn = _get_conn()
+    conn = None
     try:
+        conn = _get_conn()
         if name == "search_reports":
             args = arguments or {}
             results = search_module.search_metadata(
@@ -272,7 +273,8 @@ async def handle_call_tool(
         else:
             raise ValueError(f"Unknown tool: {name}")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def _fmt(results: list[dict]) -> str:

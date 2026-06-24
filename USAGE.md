@@ -513,7 +513,7 @@ yanbao index --full --workers 8
 
 ### 语义搜索
 
-基于 `BAAI/bge-small-zh-v1.5` 模型将查询和文本块编码为 512 维向量，余弦距离排序。
+基于 `BAAI/bge-small-zh-v1.5` 模型将查询和文本块编码为 384 维向量，余弦距离排序。
 
 > 注意：语义搜索需要 GPU/CPU 加载嵌入模型。如果 `sentence-transformers` 依赖缺失或模型加载失败，向量阶段会被跳过，语义搜索返回空结果。
 

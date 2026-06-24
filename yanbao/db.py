@@ -54,7 +54,7 @@ def init_db(conn: sqlite3.Connection):
             title, stock, industry, org,
             content='reports',
             content_rowid='rowid',
-            tokenize='unicode61'
+            tokenize='unicode61 tokenchars'
         );
     """)
 

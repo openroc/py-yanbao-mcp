@@ -35,6 +35,10 @@ class AdaptiveRateLimiter:
         while self._slots and self._slots[0] < cutoff:
             self._slots.popleft()
 
+    @property
+    def backoff(self) -> int:
+        return self._backoff
+
     def _effective_qps(self) -> float:
         b = min(self._backoff, self.max_backoff_factor)
         return self.max_qps / b if b > 0 else self.max_qps
@@ -187,7 +191,7 @@ class DownloadState:
 
     @staticmethod
     def make_key(info_code: str) -> str:
-        return hashlib.md5(info_code.encode()).hexdigest()[:16]
+        return hashlib.md5(info_code.encode()).hexdigest()
 
     @property
     def count(self) -> int:
@@ -230,45 +234,6 @@ class YanbaoDownloader:
         self.api = EastMoneyAPI(self.limiter, self.session)
         self.state = DownloadState(self.output_dir / ".download_state.json")
         self._corrupted = load_corrupted_set()
-
-    def _save_metadata(self, item: dict) -> Optional[Path]:
-        info_code = (item.get("infoCode") or "").strip()
-        title = (item.get("title") or "无标题").strip()
-        org = (item.get("orgName") or "未知机构").strip()
-        date = (item.get("publishDate", "") or "")[:10]
-        stock = (item.get("stockName") or "").strip()
-        stock_code = (item.get("stockCode") or "").strip()
-        industry = (item.get("indvInduName") or "").strip()
-        em_rating = (item.get("emRatingName") or "").strip()
-        authors = item.get("author", []) or []
-
-        date_prefix = date.replace("-", "")
-        safe_title = "".join(c for c in title if c.isalnum() or c in " _-()（）、").strip()[:60]
-        org_dir = org.replace(" ", "_") or "unknown"
-
-        pdf_path = self.output_dir / org_dir / f"{date_prefix}_{safe_title}.pdf"
-        json_path = self.output_dir / org_dir / f"{date_prefix}_{safe_title}.json"
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-
-        meta = {
-            "infoCode": info_code,
-            "title": title,
-            "org": org,
-            "stock": stock,
-            "stockCode": stock_code,
-            "industry": industry,
-            "emRating": em_rating,
-            "authors": authors,
-            "date": date,
-            "reportUrl": f"https://data.eastmoney.com/report/{stock_code}/{info_code}.html",
-            "pdfUrl": f"https://pdf.dfcfw.com/pdf/H3_{info_code}_1.pdf",
-        }
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-
-        if json_path.exists() and pdf_path.exists():
-            return json_path
-        return None
 
     def _process_item(self, item: dict):
         info_code = (item.get("infoCode") or "").strip()
@@ -351,7 +316,7 @@ class YanbaoDownloader:
             if items is None:
                 empty_pages += 1
                 logger.info("Page %d failed, retrying... (empty=%d)", page, empty_pages)
-                time.sleep(5 * self.limiter._backoff)
+                time.sleep(5 * self.limiter.backoff)
                 if empty_pages >= 10:
                     logger.error("10 consecutive failures, aborting")
                     break
@@ -373,7 +338,7 @@ class YanbaoDownloader:
                     last_save = now
 
             page += 1
-            time.sleep(0.3 * self.limiter._backoff)
+            time.sleep(0.3 * self.limiter.backoff)
 
         self.state.save()
         self._print_summary()

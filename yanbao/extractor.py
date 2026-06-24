@@ -57,6 +57,22 @@ def get_page_count(pdf_path: str | Path) -> int:
         return 0
 
 
+def _build_overlap(prev_paras: list[str]) -> list[str]:
+    if CHUNK_OVERLAP <= 0 or not prev_paras:
+        return []
+    overlap = []
+    overlap_len = 0
+    for p in reversed(prev_paras):
+        if overlap_len + len(p) <= CHUNK_OVERLAP:
+            overlap.insert(0, p)
+            overlap_len += len(p)
+        else:
+            break
+    if not overlap:
+        return [prev_paras[-1]]
+    return overlap
+
+
 def chunk_text(text: str) -> list[tuple[str, int]]:
     if not text:
         return []
@@ -78,8 +94,10 @@ def chunk_text(text: str) -> list[tuple[str, int]]:
             if current:
                 combined = "\n\n".join(current)
                 chunks.append((combined, current_len))
-            current = [para]
-            current_len = para_len
+            overlap = _build_overlap(current)
+            overlap_len = sum(len(p) for p in overlap)
+            current = overlap + [para]
+            current_len = overlap_len + para_len
 
     if current:
         combined = "\n\n".join(current)
