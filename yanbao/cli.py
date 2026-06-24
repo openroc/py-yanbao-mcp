@@ -140,9 +140,8 @@ def by_industry(industry, limit, json_out):
 def status(json_out):
     """查看索引进度"""
     import json as _json
-    from pathlib import Path
-    from .config import INDEX_STATE_PATH, PROJECT_DIR
-    db_path = PROJECT_DIR / "data" / "reports.db"
+    from .config import DB_PATH, INDEX_STATE_PATH
+    db_path = DB_PATH
     if not db_path.exists():
         click.echo("数据库不存在，尚未执行过索引")
         return

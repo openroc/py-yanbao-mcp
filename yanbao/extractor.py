@@ -29,22 +29,23 @@ def _clean(text: str) -> str:
     return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
-def try_extract(pdf_path: str | Path) -> tuple[str | None, str | None]:
+def try_extract(pdf_path: str | Path) -> tuple[str | None, str | None, int]:
     path = Path(pdf_path)
     if not path.exists():
-        return None, "file not found"
+        return None, "file not found", 0
     try:
         reader = PdfReader(str(path))
+        page_count = len(reader.pages)
         pages = []
         for page in reader.pages:
             text = page.extract_text()
             if text:
                 pages.append(_clean(text))
         if not pages:
-            return None, "no text extracted"
-        return "\n".join(pages), None
+            return None, "no text extracted", page_count
+        return "\n".join(pages), None, page_count
     except Exception as e:
-        return None, str(e)
+        return None, str(e), 0
 
 
 def get_page_count(pdf_path: str | Path) -> int:

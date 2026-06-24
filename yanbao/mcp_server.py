@@ -188,7 +188,8 @@ async def handle_call_tool(
             return [types.TextContent(type="text", text=_fmt_semantic(results))]
 
         elif name == "get_report":
-            info_code = arguments.get("info_code", "")
+            args = arguments or {}
+            info_code = args.get("info_code", "")
             result = search_module.get_report(conn, info_code)
             if result is None:
                 return [types.TextContent(type="text", text="未找到该研报")]
@@ -264,7 +265,8 @@ async def handle_call_tool(
             return [types.TextContent(type="text", text=_fmt_factor(results))]
 
         elif name == "get_report_factors":
-            info_code = arguments.get("info_code", "")
+            args = arguments or {}
+            info_code = args.get("info_code", "")
             results = search_module.get_factors_by_report(conn, info_code)
             if not results:
                 return [types.TextContent(type="text", text="该研报暂无因子数据")]

@@ -2,34 +2,29 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Iterator
 
 from .config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
 
-def _hash_file(path: Path) -> str:
-    return hashlib.md5(path.read_bytes()).hexdigest()
-
-
-def _parse_json(path: Path) -> dict | None:
+def _parse_json(path: Path) -> tuple[dict | None, bytes]:
     raw = path.read_bytes()
     encodings = ["utf-8", "gbk", "gb18030"]
     for enc in encodings:
         try:
-            return json.loads(raw.decode(enc))
+            return json.loads(raw.decode(enc)), raw
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
     try:
         import chardet
         det = chardet.detect(raw)
         if det["encoding"] and det["confidence"] > 0.5:
-            return json.loads(raw.decode(det["encoding"]))
+            return json.loads(raw.decode(det["encoding"])), raw
     except Exception:
         pass
     logger.warning(f"Failed to decode JSON: {path}")
-    return None
+    return None, raw
 
 
 def scan_all() -> list[dict]:
@@ -40,7 +35,7 @@ def scan_all() -> list[dict]:
         for fpath in sorted(entry.iterdir()):
             if fpath.suffix.lower() != ".json":
                 continue
-            meta = _parse_json(fpath)
+            meta, raw = _parse_json(fpath)
             if meta is None:
                 continue
             pdf_path = fpath.with_suffix(".pdf")
@@ -58,7 +53,7 @@ def scan_all() -> list[dict]:
                 "pdf_url": (meta.get("pdfUrl") or "").strip(),
                 "pdf_path": str(pdf_path) if pdf_path.exists() else "",
                 "json_path": str(fpath),
-                "file_hash": _hash_file(fpath),
+                "file_hash": hashlib.md5(raw).hexdigest(),
             })
     return results
 

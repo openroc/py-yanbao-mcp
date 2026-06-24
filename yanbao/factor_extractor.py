@@ -109,10 +109,9 @@ def extract_factors_from_text(text: str) -> list[dict[str, Any]]:
     factors = []
     lines = text.split("\n")
 
-    # 单位映射
     unit_patterns = [
         (r"([\d,.]+)\s*[万亿元]/[年吨个]?", "万/单位", "产能"),
-        (r"([\d,.]+)\s*%.*?(利用|利用|产)", "%", "产能"),
+        (r"([\d,.]+)\s*%.*?(利用率|产能)", "%", "产能"),
         (r"([\d,.]+)\s*亿.*?(订单|在手)", "亿", "订单"),
         (r"([\d,.]+)\s*[万亿]?元/[吨瓦公斤]", "元/单位", "报价"),
         (r"([\d,.]+)\s*%.*?(同比|YoY|增长)", "%", "增速"),
@@ -136,7 +135,6 @@ def extract_factors_from_text(text: str) -> list[dict[str, Any]]:
                         "source_text": line.strip()[:500],
                         "chunk_text": text[:2000],
                     })
-                    break
 
     return factors
 

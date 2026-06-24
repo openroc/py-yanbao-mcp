@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import db as db_module
 from .config import CORRUPTED_PDFS_PATH, INDEX_STATE_PATH, FACTOR_VEC_TABLE_NAME
-from .extractor import get_page_count, chunk_text, try_extract
+from .extractor import chunk_text, try_extract
 from .scanner import scan_all, find_new_and_changed
 
 logging.getLogger("pypdf").setLevel(logging.ERROR)
@@ -39,11 +39,10 @@ def _worker_init():
 def _worker_process_pdf(batch: list[tuple]) -> list[tuple]:
     results = []
     for code, pdf_path in batch:
-        text, err = try_extract(pdf_path)
+        text, err, page_count = try_extract(pdf_path)
         if text is None:
             results.append(("error", code, pdf_path, err or "unknown"))
             continue
-        page_count = get_page_count(pdf_path)
         chunks = chunk_text(text)
         results.append(("ok", code, page_count, chunks))
     return results
@@ -97,7 +96,7 @@ def index_metadata(conn, records: list[dict], reset: bool = False) -> int:
 
 
 def index_pdf_content(conn, info_code: str, pdf_path: str) -> int:
-    text, err = try_extract(pdf_path)
+    text, err, page_count = try_extract(pdf_path)
     if text is None:
         if err:
             logger.warning(f"Corrupted PDF: {pdf_path} ({err})")
@@ -105,7 +104,6 @@ def index_pdf_content(conn, info_code: str, pdf_path: str) -> int:
             _log_corrupted_pdf(info_code, pdf_path, err)
             conn.commit()
         return 0
-    page_count = get_page_count(pdf_path)
     conn.execute("UPDATE reports SET page_count=? WHERE info_code=?", (page_count, info_code))
     chunks = chunk_text(text)
     if not chunks:
