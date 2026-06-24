@@ -18,10 +18,15 @@ A 股券商研报本地知识库。支持东方财富研报下载、元数据检
   - [yanbao by-industry](#yanbao-by-industry)
   - [yanbao status](#yanbao-status)
   - [yanbao stats](#yanbao-stats)
-  - [yanbao serve](#yanbao-serve)
+   - [yanbao serve](#yanbao-serve)
+   - [yanbao fix](#yanbao-fix)
+   - [yanbao chat](#yanbao-chat)
+   - [yanbao summary](#yanbao-summary)
+   - [yanbao analyze](#yanbao-analyze)
 - [MCP Server](#mcp-server)
 - [数据库结构](#数据库结构)
 - [索引管线](#索引管线)
+- [因子提取](#因子提取)
 - [搜索](#搜索)
 - [下载限流策略](#下载限流策略)
 - [损坏 PDF 处理](#损坏-pdf-处理)
@@ -82,6 +87,13 @@ YANBAO_CORRUPTED_PDFS=data/corrupted_pdfs.jsonl
 
 # 日志级别
 YANBAO_LOG_LEVEL=INFO
+
+# LLM 配置（RAG 问答/摘要/分析/因子提取）
+YANBAO_LLM_ENABLED=true         # 是否启用 LLM 功能
+YANBAO_LLM_BASE_URL=http://localhost:8080/v1  # OpenAI 兼容 API 地址
+YANBAO_LLM_MODEL=               # 模型名（为空则使用服务端默认）
+YANBAO_LLM_TIMEOUT=60           # 请求超时秒数
+YANBAO_LLM_API_KEY=             # API Key（如需要）
 ```
 
 ---
@@ -218,6 +230,7 @@ yanbao index --full --reset
 1. **metadata** — 扫描全部 JSON 文件，写入 `reports` 表
 2. **pdf_extraction** — 提取 PDF 文本 → 分块 → 写入 `text_chunks` 表
 3. **vector_generation** — 生成文本向量 → 写入 `chunk_vectors` 表（需 sentence-transformers 模型加载成功）
+4. **factor_extraction** — 提取结构化因子 → 写入 `factors` 表 + `factor_vectors` 表（规则提取无需 LLM；若 LLM 可用则优先使用 LLM 提取）
 
 **并行模式特点：**
 - `--workers 0`：单线程顺序处理，适合小量更新
@@ -357,6 +370,78 @@ yanbao serve
 
 启动后通过标准输入/输出与 MCP 客户端通信。详见下方 [MCP Server](#mcp-server) 章节。
 
+### yanbao fix
+
+重新下载损坏的 PDF 并重新索引。
+
+```bash
+# 修复所有损坏 PDF
+yanbao fix
+
+# 指定限速
+yanbao fix --qps 0.5
+
+# 修复后不自动重新索引
+yanbao fix --no-index
+```
+
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `--qps` | 2.0 | 下载限速 |
+| `--no-index` | -- | 修复后不自动增量索引 |
+
+### yanbao chat
+
+基于研报知识库进行 RAG 问答（需 LLM 服务可用）。
+
+```bash
+# 提问
+yanbao chat "贵州茅台最近有什么评级变化？"
+
+# 指定检索相关片段数
+yanbao chat "新能源汽车产业链有哪些关键环节？" --top-k 12
+```
+
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `query` | (必填) | 自然语言问题 |
+| `--top-k` | 8 | 检索相关片段数 |
+
+> 需要 `YANBAO_LLM_ENABLED=true` 且 LLM 服务（如 llama-server）正常运行。
+
+### yanbao summary
+
+摘要单篇研报内容（需 LLM 服务可用）。
+
+```bash
+yanbao summary AP202606010001
+```
+
+| 选项 | 说明 |
+|------|------|
+| `info_code` | (必填) 研报唯一标识 |
+
+返回 200 字以内的中文摘要，涵盖核心观点、评级、关键数据。
+
+### yanbao analyze
+
+多研报综合分析（需 LLM 服务可用）。
+
+```bash
+# 综合分析
+yanbao analyze "半导体行业2025年业绩回顾"
+
+# 指定更多参考片段
+yanbao analyze "新能源补贴退坡影响" --top-k 15
+```
+
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `query` | (必填) | 分析主题 |
+| `--top-k` | 10 | 检索相关片段数 |
+
+输出各券商观点对比、分歧与共识、关键数据支撑。
+
 ---
 
 ## MCP Server
@@ -379,6 +464,10 @@ yanbao serve
 | `list_by_stock` | 某股票全部研报 | `stock_code`, `limit` |
 | `list_by_industry` | 某行业研报列表 | `industry`, `limit` |
 | `get_stats` | 知识库统计 | 无 |
+| `ask` | 基于研报知识库问答（LLM） | `query`, `top_k` |
+| `search_factors` | 搜索结构化因子（按类型/数值过滤） | `factor_type`, `min_value`, `max_value`, `unit`, `limit` |
+| `semantic_factor_search` | 语义搜索因子 | `query`, `factor_type`, `top_k` |
+| `get_report_factors` | 获取某研报的所有结构化因子 | `info_code` |
 
 ### 集成到 opencode
 
@@ -414,7 +503,7 @@ yanbao serve
 
 ## 数据库结构
 
-单一 SQLite 文件 `data/reports.db`，含 4 张核心表：
+单一 SQLite 文件 `data/reports.db`，含 7 张表：
 
 ### reports — 研报元数据
 
@@ -451,11 +540,40 @@ yanbao serve
 
 对 reports 表的 `title`/`stock`/`industry`/`org` 字段建立全文索引，通过触发器自动同步。
 
-### chunk_vectors — 向量索引（sqlite-vec）
+### chunk_vectors — 文本向量索引（sqlite-vec）
 
 | 字段 | 类型 | 说明 |
 |--------|------|-----------|
 | `chunk_id` | INTEGER PK | 关联文本块 |
+| `embedding` | float[384] | 384 维余弦归一化向量 |
+
+### factor_chunks — 因子文本块
+
+| 字段 | 类型 | 说明 |
+|--------|------|-----------|
+| `chunk_id` | INTEGER PK | 块 ID |
+| `info_code` | TEXT FK | 关联研报 |
+| `chunk_text` | TEXT | 用于提取因子的拼接文本 |
+| `indexed_at` | TEXT | 索引时间戳 |
+
+### factors — 结构化因子
+
+| 字段 | 类型 | 说明 |
+|--------|------|-----------|
+| `factor_id` | INTEGER PK | 因子 ID |
+| `chunk_id` | INTEGER FK | 关联因子文本块 |
+| `factor_type` | TEXT | 因子类型：产能/订单/报价/增速/政策/成本/库存/销量 |
+| `factor_name` | TEXT | 因子名称 |
+| `value` | REAL | 数值 |
+| `unit` | TEXT | 单位 |
+| `source_text` | TEXT | 原文句子 |
+| `created_at` | TEXT | 创建时间 |
+
+### factor_vectors — 因子向量索引（sqlite-vec）
+
+| 字段 | 类型 | 说明 |
+|--------|------|-----------|
+| `factor_id` | INTEGER PK | 关联因子 |
 | `embedding` | float[384] | 384 维余弦归一化向量 |
 
 ---
@@ -465,7 +583,7 @@ yanbao serve
 索引执行顺序：
 
 ```
-JSON 文件扫描 → 元数据入库 → PDF 文本提取 → 文本分块 → 向量生成
+JSON 文件扫描 → 元数据入库 → PDF 文本提取 → 文本分块 → 向量生成 → 因子提取
 ```
 
 ### 增量索引逻辑
@@ -475,7 +593,7 @@ JSON 文件扫描 → 元数据入库 → PDF 文本提取 → 文本分块 → 
 1. 扫描 `YANBAO_DATA_DIR` 所有 `.json` 文件
 2. 计算每个 JSON 的 MD5
 3. 与数据库中 `file_hash` 对比，找出新增/变更文件
-4. 仅处理变更文件：元数据更新 + PDF 提取 + 向量生成
+4. 仅处理变更文件：元数据更新 + PDF 提取 + 向量生成 + 因子提取
 
 ### 断点续传
 
@@ -496,6 +614,42 @@ yanbao index --full --workers 8
 ```
 
 架构：主进程将任务分为 4×Worker 个小批次 → `multiprocessing.Pool` 分发 → Worker 只做 PDF 提取（零 DB 操作） → 主进程串行写入 SQLite。
+
+---
+
+## 因子提取
+
+全量索引的最后阶段自动从研报文本中提取结构化驱动因子。
+
+### 因子类型
+
+| 类型 | 含义 | 示例 |
+|------|------|------|
+| 产能 | 产能规模、利用率、扩产计划 | 30 万吨/年、产能利用率 85% |
+| 订单 | 订单量、交付周期、在手订单 | 在手订单 50 亿元 |
+| 报价 | 产品单价 | 2.5 万元/吨 |
+| 增速 | 同比/环比增长率 | 营收同比增长 30% |
+| 政策 | 政策文件、补贴标准、规划目标 | 补贴退坡 20% |
+| 成本 | 单位成本、毛利率、净利率 | 毛利率 45% |
+| 库存 | 库存量、周转天数 | 库存 5 万吨、周转 30 天 |
+| 销量 | 销量、市占率 | 销量 50 万辆、市占率 15% |
+
+### 提取方式
+
+- **规则提取**（默认）：基于正则表达式从文本中匹配数值+单位+关键字组合，不依赖 LLM，速度快、零外部依赖
+- **LLM 提取**（推荐）：当 `YANBAO_LLM_ENABLED=true` 时，自动调用 LLM 提取，精度更高。LLM 不可用时自动降级为规则提取
+
+### 搜索因子
+
+通过 MCP 工具或 CLI 查询因子：
+
+- `search_factors` — 按因子类型/数值范围/单位过滤
+- `semantic_factor_search` — 自然语言描述搜索相关因子（如"寻找产能扩张的公司"）
+- `get_report_factors` — 查看单篇研报的所有因子
+
+### 存储
+
+因子数据存储在 `factors` 表中，因子文本向量存储在 `factor_vectors` 表（sqlite-vec），支持语义搜索。
 
 ---
 
@@ -557,6 +711,10 @@ yanbao index --full --workers 8
 | `list_by_stock` | 获取某股票的全量研报 | stock_code, limit |
 | `list_by_industry` | 获取某行业的研报 | industry, limit |
 | `get_stats` | 获取知识库统计 | 无 |
+| `ask` | 基于知识库 RAG 问答 | query, top_k |
+| `search_factors` | 按类型/数值搜索结构化因子 | factor_type, min_value, max_value, unit, limit |
+| `semantic_factor_search` | 语义搜索因子 | query, factor_type, top_k |
+| `get_report_factors` | 获取研报的全部因子 | info_code |
 
 ### opencode 配置
 
@@ -616,7 +774,7 @@ VS Code 设置 → Extensions → MCP → 添加 Server：
 ```
 
 - 数据库中标记 `page_count = -1`，断点续传跳过
-- 重新下载后从 `corrupted_pdfs.jsonl` 移除即可重试
+- 重新下载后从 `corrupted_pdfs.jsonl` 移除即可重试（或使用 `yanbao fix` 自动处理）
 - 下载器会自动跳过已损坏文件
 
 ---
@@ -660,7 +818,25 @@ pip uninstall scipy sentence-transformers; pip install sentence-transformers
 yanbao index --full --reset
 ```
 
-会清空 `reports`、`text_chunks`、`chunk_vectors` 表后重新索引。需要确认操作，可配合 `--workers N` 使用。
+会清空 `reports`、`text_chunks`、`chunk_vectors`、`factors`、`factor_chunks`、`factor_vectors` 表后重新索引。需要确认操作，可配合 `--workers N` 使用。
+
+### Q: LLM 问答/摘要/分析返回错误？
+
+确认以下条件：
+1. `YANBAO_LLM_ENABLED=true`（环境变量或 `.env`）
+2. LLM 服务（如 llama-server）运行在 `YANBAO_LLM_BASE_URL` 指定的地址
+3. 如果 `YANBAO_LLM_MODEL` 为空，服务端需有默认模型
+
+常见修复：
+- 启动 llama-server：`llama-server -m model.gguf --host 0.0.0.0 --port 8080`
+- 测试连通性：`curl http://localhost:8080/v1/chat/completions -d '{"messages":[{"role":"user","content":"hi"}]}'`
+
+### Q: 因子提取如何工作？
+
+因子提取是 `yanbao index --full` 的最后阶段，会自动执行：
+1. 将每个研报的所有文本块拼接 → 正则/LLM 提取因子 → 写入 `factors` 表
+2. 生成因子向量 → 写入 `factor_vectors` 表（支持语义搜索）
+3. 默认使用规则提取（无需外部依赖）；若 LLM 可用则优先调用 LLM，失败时自动降级
 
 ### Q: 数据存在哪里？
 
