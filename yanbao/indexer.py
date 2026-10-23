@@ -3,6 +3,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import sqlite3
 import sys
 import time
 from datetime import datetime
@@ -124,7 +125,9 @@ def index_pdf_content(conn, info_code: str, pdf_path: str) -> int:
 
 
 def index_vectors(conn, info_code: str) -> int:
-    from .embeddings import encode
+    from .embeddings import encode, is_available
+    if not is_available():
+        return 0
     rows = conn.execute(
         "SELECT chunk_id, chunk_text FROM text_chunks WHERE info_code=? ORDER BY chunk_index",
         (info_code,),
@@ -417,11 +420,15 @@ def run_incremental(conn):
             if n > 0:
                 index_vectors(conn, code)
                 index_factors(conn, code)
+                index_factor_vectors(conn, code)
     logger.info(f"Incremental index done: {len(all_to_process)} reports")
 
 
 def index_factors(conn, info_code: str) -> int:
-    """从文本块中提取因子"""
+    """从文本块中提取因子。
+
+    重复执行会先清除该研报的旧因子，保证结果幂等。
+    """
     from .factor_extractor import extract_factors_from_text
 
     rows = conn.execute(
@@ -435,26 +442,44 @@ def index_factors(conn, info_code: str) -> int:
     full_text = "\n\n".join(r["chunk_text"] for r in rows)
     factors = extract_factors_from_text(full_text)
 
-    if not factors:
-        return 0
+    # 清除该研报的旧因子与旧向量，避免重复累积
+    old_ids = [
+        r[0]
+        for r in conn.execute(
+            """SELECT f.factor_id FROM factors f
+               JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
+               WHERE fc.info_code = ?""",
+            (info_code,),
+        ).fetchall()
+    ]
+    if old_ids:
+        placeholders = ",".join("?" * len(old_ids))
+        conn.execute(
+            f"DELETE FROM {FACTOR_VEC_TABLE_NAME} WHERE factor_id IN ({placeholders})",
+            old_ids,
+        )
+    conn.execute(
+        "DELETE FROM factors WHERE chunk_id IN (SELECT chunk_id FROM factor_chunks WHERE info_code=?)",
+        (info_code,),
+    )
+    conn.execute("DELETE FROM factor_chunks WHERE info_code=?", (info_code,))
+    conn.commit()
 
     # 获取当前 chunk_id 最大值
     chunk_id_start = conn.execute(
         "SELECT COALESCE(MAX(chunk_id), 0) + 1 FROM factor_chunks"
     ).fetchone()[0]
 
-    # 插入 factor_chunks
+    # 插入 factor_chunks（即使没有提取到因子也要登记，避免每次运行重复处理）
     now = datetime.now().isoformat()
-    fc_data = [(chunk_id_start, info_code, full_text[:5000], now)]
-    conn.executemany(
+    conn.execute(
         "INSERT INTO factor_chunks(chunk_id, info_code, chunk_text, indexed_at) VALUES (?,?,?,?)",
-        fc_data,
+        (chunk_id_start, info_code, full_text[:5000], now),
     )
 
     # 插入 factors
-    factor_data = []
-    for f in factors:
-        factor_data.append((
+    factor_data = [
+        (
             chunk_id_start,
             f["factor_type"],
             f["factor_name"],
@@ -462,25 +487,29 @@ def index_factors(conn, info_code: str) -> int:
             f["unit"],
             f["source_text"],
             now,
-        ))
-    conn.executemany(
-        """INSERT INTO factors(chunk_id, factor_type, factor_name, value, unit, source_text, created_at)
-           VALUES (?,?,?,?,?,?,?)""",
-        factor_data,
-    )
+        )
+        for f in factors
+    ]
+    if factor_data:
+        conn.executemany(
+            """INSERT INTO factors(chunk_id, factor_type, factor_name, value, unit, source_text, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            factor_data,
+        )
     conn.commit()
     return len(factors)
 
 
 def index_factor_vectors(conn, info_code: str) -> int:
-    """为因子生成向量"""
+    """为因子生成向量（只处理尚无向量的因子，可重复执行）"""
     from .embeddings import encode
 
     rows = conn.execute(
-        """SELECT f.factor_id, f.source_text
-           FROM factors f
-           JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
-           WHERE fc.info_code = ?""",
+        f"""SELECT f.factor_id, f.source_text
+            FROM factors f
+            JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
+            LEFT JOIN {FACTOR_VEC_TABLE_NAME} fv ON f.factor_id = fv.factor_id
+            WHERE fc.info_code = ? AND fv.factor_id IS NULL""",
         (info_code,),
     ).fetchall()
     if not rows:
@@ -505,38 +534,59 @@ def index_factor_vectors(conn, info_code: str) -> int:
     return len(rows)
 
 
+_FACTOR_FAILURE_LOG_LIMIT = 5
+
+
+def _log_factor_failure(failures: list, code: str, error: Exception):
+    """因子阶段失败日志：前若干条详打，之后只统计总数，避免刷屏。"""
+    failures.append((code, str(error)))
+    if len(failures) <= _FACTOR_FAILURE_LOG_LIMIT:
+        logger.warning("因子处理失败 %s: %s", code, error)
+    elif len(failures) == _FACTOR_FAILURE_LOG_LIMIT + 1:
+        logger.warning("因子处理失败超过 %d 条，后续仅统计总数", _FACTOR_FAILURE_LOG_LIMIT)
+
+
 def _run_factor_phase(conn, state):
-    """运行因子提取阶段"""
+    """运行因子提取阶段（规则提取 + 因子向量）
+
+    单篇研报失败只记录并继续，不得中断整个阶段。
+    """
     logger.info("Starting factor extraction phase...")
     _save_state({**state, "phase": "factor_extraction", "last_update": datetime.now().isoformat()})
 
-    # 获取需要提取因子的报告
-    to_factor = conn.execute(
-        """SELECT DISTINCT tc.info_code
-           FROM text_chunks tc
-           LEFT JOIN factor_chunks fc ON tc.info_code = fc.info_code
-           WHERE fc.chunk_id IS NULL"""
-    ).fetchall()
+    try:
+        to_factor = [
+            r["info_code"]
+            for r in conn.execute(
+                """SELECT DISTINCT tc.info_code
+                   FROM text_chunks tc
+                   LEFT JOIN factor_chunks fc ON tc.info_code = fc.info_code
+                   WHERE fc.chunk_id IS NULL"""
+            ).fetchall()
+        ]
+    except sqlite3.OperationalError as e:
+        logger.warning("因子表不可用 (%s)，跳过因子提取阶段", e)
+        return
 
     total = len(to_factor)
     logger.info(f"Factor extraction needed for {total} reports")
 
-    if total == 0:
-        logger.info("No factors to extract")
-        return
-
-    _save_state({**state, "phase": "factor_extraction", "total": total,
-                 "done": 0, "last_update": datetime.now().isoformat()})
+    if total > 0:
+        _save_state({**state, "phase": "factor_extraction", "total": total,
+                     "done": 0, "last_update": datetime.now().isoformat()})
 
     factor_ok = 0
+    failures: list = []
     start_time = time.time()
     try:
-        for idx, row in enumerate(to_factor):
-            n = index_factors(conn, row["info_code"])
-            if n > 0:
-                factor_ok += 1
-            # 同时生成因子向量
-            index_factor_vectors(conn, row["info_code"])
+        for code in to_factor:
+            try:
+                n = index_factors(conn, code)
+                if n > 0:
+                    factor_ok += 1
+                index_factor_vectors(conn, code)
+            except Exception as e:
+                _log_factor_failure(failures, code, e)
 
             if factor_ok % 20 == 0 and factor_ok > 0:
                 conn.commit()
@@ -559,6 +609,49 @@ def _run_factor_phase(conn, state):
     except Exception as e:
         logger.warning(f"Factor extraction failed: {e}")
 
+    if failures:
+        logger.warning("因子处理失败 %d 篇（首条: %s）", len(failures), failures[0])
+
+    _run_factor_vector_backfill(conn, state)
+
     conn.commit()
     stats = db_module.get_factor_stats(conn)
     logger.info(f"Factor stats: {stats}")
+
+
+def _run_factor_vector_backfill(conn, state):
+    """为缺失向量的因子补生成向量（覆盖上一轮失败的研报）"""
+    from .embeddings import is_available
+
+    if not is_available():
+        logger.warning("Embedding 模型不可用，跳过因子向量生成")
+        return
+
+    try:
+        to_vec = [
+            r["info_code"]
+            for r in conn.execute(
+                f"""SELECT DISTINCT fc.info_code
+                    FROM factors f
+                    JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
+                    LEFT JOIN {FACTOR_VEC_TABLE_NAME} fv ON f.factor_id = fv.factor_id
+                    WHERE fv.factor_id IS NULL"""
+            ).fetchall()
+        ]
+    except sqlite3.OperationalError as e:
+        logger.warning("因子向量表不可用 (%s)，跳过", e)
+        return
+
+    if not to_vec:
+        logger.info("所有因子均已有向量")
+        return
+
+    logger.info(f"Factor vector backfill needed for {len(to_vec)} reports")
+    failures: list = []
+    for code in to_vec:
+        try:
+            index_factor_vectors(conn, code)
+        except Exception as e:
+            _log_factor_failure(failures, code, e)
+    if failures:
+        logger.warning("因子向量补齐失败 %d 篇", len(failures))

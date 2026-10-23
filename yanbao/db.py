@@ -54,7 +54,7 @@ def init_db(conn: sqlite3.Connection):
             title, stock, industry, org,
             content='reports',
             content_rowid='rowid',
-            tokenize='unicode61 tokenchars'
+            tokenize='unicode61'
         );
     """)
 
@@ -67,6 +67,7 @@ def init_db(conn: sqlite3.Connection):
     """)
 
     _sync_fts_triggers(conn)
+    init_factor_tables(conn)
 
 
 def init_factor_tables(conn: sqlite3.Connection):

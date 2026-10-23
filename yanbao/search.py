@@ -98,7 +98,9 @@ def search_metadata(
 def semantic_search(
     conn, query: str, top_k: int = 10
 ) -> list[dict]:
-    from .embeddings import encode
+    from .embeddings import encode, is_available
+    if not is_available():
+        raise RuntimeError("向量搜索不可用：embedding 模型未加载")
     query_vec = encode([query])[0]
     vec_str = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
 
@@ -269,8 +271,10 @@ def semantic_factor_search(
         factor_type: 可选的因子类型过滤
         top_k: 返回数量
     """
-    from .embeddings import encode
+    from .embeddings import encode, is_available
 
+    if not is_available():
+        raise RuntimeError("向量搜索不可用：embedding 模型未加载")
     query_vec = encode([query])[0]
     vec_str = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
 

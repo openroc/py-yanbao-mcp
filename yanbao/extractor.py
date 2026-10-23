@@ -58,50 +58,124 @@ def get_page_count(pdf_path: str | Path) -> int:
         return 0
 
 
-def _build_overlap(prev_paras: list[str]) -> list[str]:
-    if CHUNK_OVERLAP <= 0 or not prev_paras:
+def _split_long(text: str, limit: int) -> list[str]:
+    """把超长段落切成不超过 limit 字符的片段。
+
+    优先在换行/句读处断开，断不开才硬切。
+    """
+    if len(text) <= limit:
+        return [text]
+
+    pieces = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        cut = 0
+        for sep in ("\n", "。", "！", "？", "；", "，", ". ", " "):
+            idx = window.rfind(sep)
+            if idx > limit // 2:
+                cut = idx + len(sep)
+                break
+        if cut <= 0:
+            cut = limit
+        piece = remaining[:cut].strip()
+        if piece:
+            pieces.append(piece)
+        remaining = remaining[cut:]
+
+    tail = remaining.strip()
+    if tail:
+        pieces.append(tail)
+    return pieces
+
+
+def _render(segments: list[tuple[str, str]]) -> tuple[str, int]:
+    """把 (文本, 前导分隔符) 片段序列渲染成 chunk 文本。
+
+    片段序列中第一个片段的前导分隔符被丢弃（chunk 不以空白开头）。
+    """
+    if not segments:
+        return "", 0
+    parts = [segments[0][0]]
+    for text, sep in segments[1:]:
+        parts.append(sep)
+        parts.append(text)
+    rendered = "".join(parts)
+    return rendered, len(rendered)
+
+
+def _build_overlap(prev_segments: list[tuple[str, str]], budget: int) -> list[tuple[str, str]]:
+    """从上一 chunk 尾部取若干片段作为重叠，且必须放得下新片段。
+
+    budget 是留给重叠块的总字符数（含其内部与后继的分隔符）。
+    """
+    if CHUNK_OVERLAP <= 0 or not prev_segments or budget <= 0:
         return []
-    overlap = []
-    overlap_len = 0
-    for p in reversed(prev_paras):
-        if overlap_len + len(p) <= CHUNK_OVERLAP:
-            overlap.insert(0, p)
-            overlap_len += len(p)
-        else:
+
+    overlap: list[tuple[str, str]] = []
+    text_len = 0
+    contrib = 0
+    for seg in reversed(prev_segments):
+        text = seg[0]
+        delta = len(text) + (len(overlap[0][1]) if overlap else 0)
+        if contrib + delta > budget:
             break
+        if text_len + len(text) > CHUNK_OVERLAP:
+            break
+        overlap.insert(0, seg)
+        contrib += delta
+        text_len += len(text)
+
     if not overlap:
-        return [prev_paras[-1]]
+        # 上一 chunk 的末片段本身就超长，只取它的尾部
+        take = min(budget, CHUNK_OVERLAP)
+        if take > 0:
+            overlap = [(prev_segments[-1][0][-take:], "")]
     return overlap
 
 
 def chunk_text(text: str) -> list[tuple[str, int]]:
+    """把文本切成不超过 CHUNK_SIZE 字符的块。
+
+    CHUNK_SIZE 同时是 embedding 模型的 token 上限对应的字符上限，
+    因此每个 chunk 必须硬性满足长度约束，不能依赖段落边界恰好对齐。
+    """
     if not text:
         return []
-    paragraphs = text.split("\n\n")
-    chunks = []
-    current = []
-    current_len = 0
 
-    for para in paragraphs:
+    segments: list[tuple[str, str]] = []
+    for para in text.split("\n\n"):
         para = para.strip()
         if not para:
             continue
-        para_len = len(para)
+        for i, piece in enumerate(_split_long(para, CHUNK_SIZE)):
+            segments.append((piece, "\n\n" if i == 0 else "\n"))
 
-        if current_len + para_len <= CHUNK_SIZE:
-            current.append(para)
-            current_len += para_len
-        else:
-            if current:
-                combined = "\n\n".join(current)
-                chunks.append((combined, current_len))
-            overlap = _build_overlap(current)
-            overlap_len = sum(len(p) for p in overlap)
-            current = overlap + [para]
-            current_len = overlap_len + para_len
+    chunks: list[tuple[str, int]] = []
+    current: list[tuple[str, str]] = []
+    current_len = 0
+
+    for seg in segments:
+        seg_text, seg_sep = seg
+        if not current:
+            current = [seg]
+            current_len = len(seg_text)
+            continue
+
+        candidate_len = current_len + len(seg_sep) + len(seg_text)
+        if candidate_len <= CHUNK_SIZE:
+            current.append(seg)
+            current_len = candidate_len
+            continue
+
+        rendered, current_len = _render(current)
+        chunks.append((rendered, current_len))
+
+        overlap = _build_overlap(current, CHUNK_SIZE - len(seg_sep) - len(seg_text))
+        current = overlap + [seg]
+        current_len = _render(current)[1]
 
     if current:
-        combined = "\n\n".join(current)
-        chunks.append((combined, current_len))
+        chunks.append(_render(current))
 
     return chunks

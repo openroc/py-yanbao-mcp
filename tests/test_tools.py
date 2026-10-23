@@ -115,7 +115,14 @@ def test_get_stats():
     return "PASS"
 
 
-def test_mcp_smoke():
+def mcp_smoke():
+    """MCP 冒烟测试：仅通过 `python tests/test_tools.py --mcp` 运行。
+
+    名字不加 test_ 前缀，避免被 pytest 自动收集（该测试会阻塞等待
+    stdio 响应，在 pytest 下会挂起整个测试会话）。
+
+    MCP stdio 传输按规范使用「按行分隔的 JSON」，不是 LSP 的 Content-Length 帧。
+    """
     import json, subprocess
     proc = subprocess.Popen(
         [sys.executable, "-m", "yanbao.cli", "serve"],
@@ -124,52 +131,51 @@ def test_mcp_smoke():
         cwd=str(Path(__file__).resolve().parent.parent),
     )
 
-    init = json.dumps({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "test", "version": "0.1.0"},
-        },
-    })
-    proc.stdin.write(f"Content-Length: {len(init)}\r\n\r\n{init}".encode())
-    proc.stdin.flush()
+    def send(payload: dict):
+        proc.stdin.write((json.dumps(payload) + "\n").encode())
+        proc.stdin.flush()
 
-    header = b""
-    deadline = time.time() + 8
-    while time.time() < deadline:
-        ch = proc.stdout.read(1)
-        if not ch:
-            break
-        header += ch
-        if header.endswith(b"\r\n\r\n"):
-            break
+    def read_response(request_id: int, timeout: float = 15.0) -> dict:
+        """读取直到收到指定 id 的响应。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("id") == request_id:
+                return msg
+        raise TimeoutError(f"未收到 id={request_id} 的响应")
 
-    if not header:
-        proc.kill()
-        return "FAIL: timeout (server may need conda env)"
+    try:
+        send({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0.1.0"},
+            },
+        })
+        result = read_response(1)
+        assert result.get("id") == 1
+        protocol = result["result"].get("protocolVersion")
 
-    length = 0
-    for line in header.decode().split("\r\n"):
-        if line.lower().startswith("content-length:"):
-            length = int(line.split(":")[1].strip())
-
-    body = b""
-    if length:
-        import threading
-        def _read():
-            nonlocal body
-            body = proc.stdout.read(length)
-        t = threading.Thread(target=_read, daemon=True)
-        t.start()
-        t.join(timeout=5)
-        if t.is_alive():
-            proc.kill()
-            return "FAIL: body read timeout"
-    proc.terminate()
-    result = json.loads(body.decode())
-    assert result.get("id") == 1
-    return f"PASS (protocol {result['result'].get('protocolVersion')})"
+        send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        tools = read_response(2)
+        names = [t["name"] for t in tools["result"]["tools"]]
+        assert "search_reports" in names
+        return f"PASS (protocol {protocol}, {len(names)} tools)"
+    except TimeoutError as e:
+        return f"FAIL: {e}"
+    finally:
+        proc.terminate()
 
 
 if __name__ == "__main__":
@@ -184,7 +190,7 @@ if __name__ == "__main__":
         test_get_stats,
     ]
     if run_mcp:
-        tests.append(test_mcp_smoke)
+        tests.append(mcp_smoke)
 
     passed = failed = skipped = 0
     for t in tests:
