@@ -127,6 +127,20 @@ def _sync_fts_triggers(conn: sqlite3.Connection):
     """)
 
 
+def vectorized_chunk_ids(conn: sqlite3.Connection) -> set[int]:
+    """已有向量的 chunk_id 集合。
+
+    不能把普通表与 vec0 虚拟表 JOIN：sqlite-vec 的向量匹配是逐行 KNN 查询，
+    几十万行 JOIN 会跑几十分钟。这里做一次全表扫描后在 Python 侧比对。
+    """
+    return {r[0] for r in conn.execute(f"SELECT chunk_id FROM {VEC_TABLE_NAME}")}
+
+
+def vectorized_factor_ids(conn: sqlite3.Connection) -> set[int]:
+    """已有向量的 factor_id 集合（同上，不能 JOIN vec0）。"""
+    return {r[0] for r in conn.execute(f"SELECT factor_id FROM {FACTOR_VEC_TABLE_NAME}")}
+
+
 def get_stats(conn: sqlite3.Connection) -> dict:
     r = conn.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
     c = conn.execute("SELECT COUNT(*) FROM text_chunks").fetchone()[0]

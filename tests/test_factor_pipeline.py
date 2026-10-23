@@ -63,8 +63,10 @@ def test_init_db_is_idempotent():
 
 # --- #3 阶段容错 ---------------------------------------------------------
 
-def test_factor_phase_survives_single_report_failure(monkeypatch):
+def test_factor_phase_survives_single_report_failure(monkeypatch, tmp_path):
     """单篇研报因子处理失败，不得中断整个因子阶段。"""
+    # 阶段函数会写状态文件，测试里必须隔离，否则覆盖生产状态
+    monkeypatch.setattr(indexer, "INDEX_STATE_PATH", tmp_path / "state.json")
     conn = _fresh_conn()
     init_db(conn)
     for i in range(3):
@@ -83,8 +85,9 @@ def test_factor_phase_survives_single_report_failure(monkeypatch):
     conn.close()
 
 
-def test_factor_phase_skips_when_tables_missing(monkeypatch):
+def test_factor_phase_skips_when_tables_missing(monkeypatch, tmp_path):
     """因子表不存在时应降级跳过，而不是抛异常终止索引。"""
+    monkeypatch.setattr(indexer, "INDEX_STATE_PATH", tmp_path / "state.json")
     conn = _fresh_conn()
     conn.executescript(
         "CREATE TABLE reports (info_code TEXT PRIMARY KEY);"
@@ -135,8 +138,9 @@ def test_index_factor_vectors_only_inserts_missing(monkeypatch):
 
 # --- #3 增量路径 ---------------------------------------------------------
 
-def test_run_incremental_generates_factor_vectors(monkeypatch):
+def test_run_incremental_generates_factor_vectors(monkeypatch, tmp_path):
     """增量索引也必须生成因子向量。"""
+    monkeypatch.setattr(indexer, "INDEX_STATE_PATH", tmp_path / "state.json")
     conn = _fresh_conn()
     init_db(conn)
 

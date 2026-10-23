@@ -149,9 +149,16 @@ def status(json_out):
     total = conn.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
     with_pdf = conn.execute("SELECT COUNT(*) FROM reports WHERE page_count > 0").fetchone()[0]
     with_chunks = conn.execute("SELECT COUNT(DISTINCT info_code) FROM text_chunks").fetchone()[0]
-    with_vectors = conn.execute(
-        "SELECT COUNT(DISTINCT tc.info_code) FROM text_chunks tc JOIN chunk_vectors cv ON tc.chunk_id = cv.chunk_id"
-    ).fetchone()[0]
+    # 不能 JOIN vec0 虚拟表（逐行 KNN 查询，几十万行要跑几十分钟），
+    # 改为全表扫描后在 Python 侧比对
+    vec_ids = db_module.vectorized_chunk_ids(conn)
+    with_vectors = len(
+        {
+            code
+            for code, cid in conn.execute("SELECT info_code, chunk_id FROM text_chunks")
+            if cid in vec_ids
+        }
+    )
     conn.close()
     state = {}
     if INDEX_STATE_PATH.exists():

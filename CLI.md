@@ -105,9 +105,9 @@ yanbao status --json-out
 yanbao stats             # 报告数、块数、覆盖标的/行业/券商、日期范围
 ```
 
-> `status` 里「向量已索引」一栏对 `text_chunks` 与 `chunk_vectors` 做了 JOIN，
-> 而 sqlite-vec 的 JOIN 是逐行 KNN 查询，**数据量大时会明显变慢**（分钟级）。
-> 只想看数量的话用 `stats`，它走普通表聚合。
+> `status` 里「向量已索引」一栏统计的是**已有向量的研报数**（不是向量条数）。
+> 统计走的是全表扫描 + Python 侧比对，不做跨表 JOIN——sqlite-vec 的 JOIN 是
+> 逐行 KNN 查询，几十万行 JOIN 会跑到分钟级。
 
 ---
 
@@ -260,5 +260,6 @@ python rechunk_and_reindex.py --no-vectors    # 只重建块，不生成向量
 - **`--reset` 会清空数据**：仅在确认要重来时使用，会弹二次确认。
 - **向量不可用时**：`semantic` 会明确报「embedding 模型未加载」，而不是静默返回空。
 - **大库避免跨表 JOIN vec0**：sqlite-vec 的向量表 JOIN 是逐行 KNN 查询，普通表
-  关联请在 Python 侧做集合比对。
+  关联请在 Python 侧做集合比对（`db.vectorized_chunk_ids` / `db.vectorized_factor_ids`
+  已封装好这个模式）。
 - **Windows 控制台编码**：中文日志乱码时加 `PYTHONIOENCODING=utf-8`。

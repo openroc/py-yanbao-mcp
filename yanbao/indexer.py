@@ -136,6 +136,19 @@ def index_vectors(conn, info_code: str) -> int:
         return 0
     texts = [r["chunk_text"] for r in rows]
     chunk_ids = [r["chunk_id"] for r in rows]
+    # 过滤掉已有向量的块：vec0 主键冲突会直接抛异常
+    placeholders = ",".join("?" * len(chunk_ids))
+    have = {
+        r[0]
+        for r in conn.execute(
+            f"SELECT chunk_id FROM {VEC_TABLE} WHERE chunk_id IN ({placeholders})", chunk_ids
+        )
+    }
+    pairs = [(cid, t) for cid, t in zip(chunk_ids, texts) if cid not in have]
+    if not pairs:
+        return 0
+    chunk_ids = [cid for cid, _ in pairs]
+    texts = [t for _, t in pairs]
     embeddings = encode(texts)
     if len(embeddings) == 0:
         return 0
@@ -147,7 +160,7 @@ def index_vectors(conn, info_code: str) -> int:
         f"INSERT INTO {VEC_TABLE}(chunk_id, embedding) VALUES (?,?)", vec_data
     )
     conn.commit()
-    return len(rows)
+    return len(chunk_ids)
 
 
 def run_metadata_only(conn):
@@ -357,19 +370,25 @@ def _run_vector_phase(conn, state):
     logger.info("Starting vector generation...")
     _save_state({**state, "phase": "vector_generation", "last_update": datetime.now().isoformat()})
     try:
-        to_vec = conn.execute(
-            """SELECT DISTINCT tc.info_code FROM text_chunks tc
-               LEFT JOIN chunk_vectors cv ON tc.chunk_id = cv.chunk_id
-               WHERE cv.chunk_id IS NULL"""
-        ).fetchall()
+        # 不能 JOIN vec0 虚拟表（逐行 KNN 查询），改为扫描后在 Python 侧比对
+        vec_ids = db_module.vectorized_chunk_ids(conn)
+        to_vec = sorted(
+            {
+                code
+                for code, cid in conn.execute(
+                    "SELECT info_code, chunk_id FROM text_chunks"
+                )
+                if cid not in vec_ids
+            }
+        )
         total_vec = len(to_vec)
         logger.info(f"Vector generation needed for {total_vec} reports")
         _save_state({**state, "phase": "vector_generation", "total": total_vec,
                      "done": 0, "last_update": datetime.now().isoformat()})
         vec_ok = 0
         start_time = time.time()
-        for idx, row in enumerate(to_vec):
-            n = index_vectors(conn, row["info_code"])
+        for idx, code in enumerate(to_vec):
+            n = index_vectors(conn, code)
             if n > 0:
                 vec_ok += 1
             if idx % 5 == 0:
@@ -505,13 +524,26 @@ def index_factor_vectors(conn, info_code: str) -> int:
     from .embeddings import encode
 
     rows = conn.execute(
-        f"""SELECT f.factor_id, f.source_text
-            FROM factors f
-            JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
-            LEFT JOIN {FACTOR_VEC_TABLE_NAME} fv ON f.factor_id = fv.factor_id
-            WHERE fc.info_code = ? AND fv.factor_id IS NULL""",
+        """SELECT f.factor_id, f.source_text
+           FROM factors f
+           JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
+           WHERE fc.info_code = ?""",
         (info_code,),
     ).fetchall()
+    if not rows:
+        return 0
+
+    # 过滤掉已有向量的因子：vec0 主键冲突会直接抛异常
+    factor_ids = [r["factor_id"] for r in rows]
+    placeholders = ",".join("?" * len(factor_ids))
+    have = {
+        r[0]
+        for r in conn.execute(
+            f"SELECT factor_id FROM {FACTOR_VEC_TABLE_NAME} WHERE factor_id IN ({placeholders})",
+            factor_ids,
+        )
+    }
+    rows = [r for r in rows if r["factor_id"] not in have]
     if not rows:
         return 0
 
@@ -628,16 +660,19 @@ def _run_factor_vector_backfill(conn, state):
         return
 
     try:
-        to_vec = [
-            r["info_code"]
-            for r in conn.execute(
-                f"""SELECT DISTINCT fc.info_code
-                    FROM factors f
-                    JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id
-                    LEFT JOIN {FACTOR_VEC_TABLE_NAME} fv ON f.factor_id = fv.factor_id
-                    WHERE fv.factor_id IS NULL"""
-            ).fetchall()
-        ]
+        # 不能 JOIN vec0 虚拟表（逐行 KNN 查询），改为扫描后在 Python 侧比对
+        vec_ids = db_module.vectorized_factor_ids(conn)
+        to_vec = sorted(
+            {
+                code
+                for code, fid in conn.execute(
+                    """SELECT fc.info_code, f.factor_id
+                       FROM factors f
+                       JOIN factor_chunks fc ON f.chunk_id = fc.chunk_id"""
+                )
+                if fid not in vec_ids
+            }
+        )
     except sqlite3.OperationalError as e:
         logger.warning("因子向量表不可用 (%s)，跳过", e)
         return
