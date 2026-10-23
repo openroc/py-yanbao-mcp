@@ -6,7 +6,7 @@ A 股券商研报本地知识库。从东方财富下载研报，建立 SQLite �
 
 - **研报下载** — 从东方财富全量/增量下载研报 JSON + PDF，自适应限流 + 指数退避
 - **元数据检索** — 支持多条件组合过滤（股票/行业/券商/日期/关键词），FTS5 全文索引
-- **语义搜索** — 基于 `BAAI/bge-small-zh-v1.5` 的 384 维向量余弦相似度搜索
+- **语义搜索** — 基于 `BAAI/bge-small-zh-v1.5` 的 512 维向量余弦相似度搜索
 - **因子提取** — 从研报文本中提取结构化驱动因子（产能/订单/报价/增速/政策/成本/库存/销量），支持规则提取和 LLM 提取
 - **RAG 问答** — LLM 驱动的研报问答、单篇摘要、多研报综合分析（兼容 OpenAI API）
 - **MCP Server** — 通过 Model Context Protocol 与 opencode、Claude Desktop 等 AI 客户端集成
@@ -45,10 +45,10 @@ yanbao serve
 SQLite 数据库 (data/reports.db)
  ├── reports          — 元数据 (FTS5 全文索引)
  ├── text_chunks      — PDF 文本分块
- ├── chunk_vectors    — 文本向量 (sqlite-vec, 384维)
+ ├── chunk_vectors    — 文本向量 (sqlite-vec, 512维)
  ├── factors          — 结构化因子
  ├── factor_chunks    — 因子文本块
- └── factor_vectors   — 因子向量 (sqlite-vec, 384维)
+ └── factor_vectors   — 因子向量 (sqlite-vec, 512维)
     ↓ 查询
 CLI (click) / MCP Server (mcp)
 ```
@@ -69,6 +69,7 @@ CLI (click) / MCP Server (mcp)
 
 详见 [USAGE.md](USAGE.md)，包含：
 
+- 命令行速查表见 [CLI.md](CLI.md)
 - 完整配置项说明
 - 所有 CLI 命令详解（download/update/index/search/semantic/report/by-stock/by-industry/status/stats/serve/fix/chat/summary/analyze）
 - MCP Server 工具列表及客户端集成指南
@@ -96,6 +97,7 @@ yanbao-mcp/
 │   ├── db.py             — 数据库初始化与查询
 │   └── config.py         — 配置管理
 ├── tests/                — 单元测试
+├── CLI.md                — 命令行速查表
 ├── USAGE.md              — 完整使用手册
 └── pyproject.toml        — 项目元数据
 ```

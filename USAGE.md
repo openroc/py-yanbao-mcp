@@ -139,6 +139,8 @@ H:/tmp/reports/
 
 ## CLI 命令
 
+> 速查表见 [CLI.md](CLI.md)（按当前代码核对过的命令与选项一览）。
+
 ### yanbao download
 
 从东方财富全量下载研报，默认下载后续自动执行增量索引。
@@ -545,7 +547,7 @@ yanbao serve
 | 字段 | 类型 | 说明 |
 |--------|------|-----------|
 | `chunk_id` | INTEGER PK | 关联文本块 |
-| `embedding` | float[384] | 384 维余弦归一化向量 |
+| `embedding` | float[512] | 512 维余弦归一化向量 |
 
 ### factor_chunks — 因子文本块
 
@@ -574,7 +576,7 @@ yanbao serve
 | 字段 | 类型 | 说明 |
 |--------|------|-----------|
 | `factor_id` | INTEGER PK | 关联因子 |
-| `embedding` | float[384] | 384 维余弦归一化向量 |
+| `embedding` | float[512] | 512 维余弦归一化向量 |
 
 ---
 
@@ -667,7 +669,7 @@ yanbao index --full --workers 8
 
 ### 语义搜索
 
-基于 `BAAI/bge-small-zh-v1.5` 模型将查询和文本块编码为 384 维向量，余弦距离排序。
+基于 `BAAI/bge-small-zh-v1.5` 模型将查询和文本块编码为 512 维向量，余弦距离排序。
 
 > 注意：语义搜索需要 GPU/CPU 加载嵌入模型。如果 `sentence-transformers` 依赖缺失或模型加载失败，向量阶段会被跳过，语义搜索返回空结果。
 
