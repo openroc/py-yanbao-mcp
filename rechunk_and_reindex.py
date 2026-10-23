@@ -34,28 +34,27 @@ BATCH_VECTORS = 256
 
 
 def _done_reports(conn) -> set[str]:
-    """返回已重建（块长度合规且向量齐全）的研报集合。"""
-    chunk_stats = {
-        r[0]: (r[1], r[2])
-        for r in conn.execute(
-            """SELECT info_code, COUNT(*), COALESCE(MAX(length(chunk_text)), 0)
-               FROM text_chunks GROUP BY info_code"""
-        )
+    """返回已重建（块长度合规且向量齐全）的研报集合。
+
+    注意：不能把普通表与 vec0 虚拟表 JOIN —— sqlite-vec 的向量匹配是逐行
+    KNN 查询，68k 行 JOIN 会跑几十分钟。这里改为一次全表扫描后在 Python
+    侧比对。
+    """
+    vec_ids = {r[0] for r in conn.execute(f"SELECT chunk_id FROM {VEC_TABLE_NAME}")}
+    per_report: dict[str, list] = {}
+    for code, cid, length in conn.execute(
+        "SELECT info_code, chunk_id, length(chunk_text) FROM text_chunks"
+    ):
+        entry = per_report.setdefault(code, [0, 0, True])
+        entry[0] += 1
+        entry[1] = max(entry[1], length)
+        if cid not in vec_ids:
+            entry[2] = False
+    return {
+        code
+        for code, (_n, max_len, all_vec) in per_report.items()
+        if max_len <= CHUNK_SIZE and all_vec
     }
-    vec_counts = {
-        r[0]: r[1]
-        for r in conn.execute(
-            f"""SELECT tc.info_code, COUNT(fv.chunk_id)
-                FROM text_chunks tc
-                JOIN {VEC_TABLE_NAME} fv ON fv.chunk_id = tc.chunk_id
-                GROUP BY tc.info_code"""
-        )
-    }
-    done = set()
-    for code, (n, max_len) in chunk_stats.items():
-        if max_len <= CHUNK_SIZE and vec_counts.get(code, 0) == n:
-            done.add(code)
-    return done
 
 
 def _report_texts(conn, codes: list[str]) -> dict[str, str]:
@@ -79,9 +78,10 @@ def _replace_chunks(conn, code: str, chunks: list[tuple[str, int]], next_id: int
         ).fetchall()
     ]
     if old_ids:
-        placeholders = ",".join("?" * len(old_ids))
-        conn.execute(
-            f"DELETE FROM {VEC_TABLE_NAME} WHERE chunk_id IN ({placeholders})", old_ids
+        # vec0 的 DELETE 按主键等值逐条执行，IN (...) 不走索引且无法批量
+        conn.executemany(
+            f"DELETE FROM {VEC_TABLE_NAME} WHERE chunk_id = ?",
+            [(cid,) for cid in old_ids],
         )
     conn.execute("DELETE FROM text_chunks WHERE info_code=?", (code,))
 
