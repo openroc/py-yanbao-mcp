@@ -1,3 +1,18 @@
+---
+id: cli-surface
+type: module-design
+title: 命令行界面契约
+status: draft
+parent: architecture
+depends-on:
+  - acquisition
+  - indexing
+  - retrieval
+  - llm
+  - storage
+  - configuration
+---
+
 # yanbao-mcp 命令行速查
 
 本文是**当前代码的命令行速查表**（对照 `yanbao/cli.py` 核对）。完整原理说明、
@@ -6,6 +21,14 @@
 - 入口：`yanbao <命令>`（安装后）或 `python -m yanbao.cli <命令>`（源码目录）
 - 查看某命令的全部选项：`yanbao <命令> --help`
 - 常用后缀：`--json-out` 输出 JSON，便于脚本消费
+
+## 职责与边界
+
+`yanbao/cli.py` 是入口层：把子命令映射到下载、索引、检索与 LLM 能力，负责参数解析、输出形态（可读表格 / `--json-out`）与破坏性操作的二次确认，**不含业务逻辑**。
+
+边界：只调用获取、索引、检索、LLM 与存储统计这几个模块；不直接写 SQL，不自行实现检索或索引规则。
+
+已知缺口（已确认）：因子检索（`search_factors` / `semantic_factor_search` / `get_report_factors`）目前只在 MCP 工具面暴露，CLI 没有对应命令。按产品决定，CLI 与 MCP 的检索能力应当对齐；补齐后需同步更新本文的命令速查表。
 
 ## 命令速查表
 

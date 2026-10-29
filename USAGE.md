@@ -1,9 +1,63 @@
+---
+id: architecture
+type: architecture-design
+title: 系统架构与数据契约
+status: draft
+parent: goal-yanbao
+references:
+  - goal-yanbao
+---
+
 # yanbao-mcp 使用手册
 
 A 股券商研报本地知识库。支持东方财富研报下载、元数据检索、FTS5 全文搜索、语义向量搜索，提供 CLI 和 MCP Server 两种使用方式。
 
+本文同时是系统的**架构节点**：拓扑、模块边界与跨切面不变量见「架构拓扑与模块边界」一节，其余章节描述各部分的数据契约与行为。
+
+## 架构拓扑与模块边界
+
+数据流：
+
+```
+东方财富 API ──下载──▶ 本地 JSON + PDF（YANBAO_DATA_DIR）
+                             │
+                        扫描（scanner）
+                             ▼
+        reports 元数据 ──▶ SQLite（reports / reports_fts）
+              │
+              ├─ PDF 提取 ─▶ text_chunks ─▶ chunk_vectors（sqlite-vec）
+              └─ 因子提取 ─▶ factor_chunks / factors ─▶ factor_vectors
+                             │
+                    检索（search）──▶ CLI / MCP Server
+                             └──────▶ LLM 问答（llm）
+```
+
+模块边界（依赖自上而下，无反向依赖）：
+
+- **配置**（`yanbao/config.py`）只提供常量，其它模块只读它。
+- **存储**（`yanbao/db.py`）拥有库表结构与连接管理；SQL 语句由使用方模块自行编写。
+- **生产数据的四个模块**——获取（downloader + scanner）、提取（extractor）、编码（embeddings）、因子（factor_extractor）——彼此不互相依赖，由**索引管线**（indexer）编排。
+- **检索**（`yanbao/search.py`）只读，不写库。
+- **LLM**（`yanbao/llm.py`）依赖检索取上下文，不直接触碰库表细节。
+- **CLI 与 MCP Server** 是两个等价入口层，只调用检索与 LLM，本身不含业务逻辑。
+
+跨切面不变量：
+
+1. 文本块长度硬上限 `CHUNK_SIZE`（默认 512 字符），与 `bge-small-zh-v1.5` 的 512 token 上限对齐；写入 `text_chunks` 的内容必须满足。
+2. `EMBEDDING_DIM = 512` 必须与嵌入模型实际输出一致；换模型要同时改配置与库表并重建。
+3. **不得把普通表与 vec0 虚拟表 JOIN**——sqlite-vec 的向量匹配是逐行 KNN，几十万行会跑几十分钟；改为扫描后在 Python 侧比对。
+4. vec0 以主键去重，插入前必须过滤已存在的 id，否则直接报错。
+5. `reports.page_count` 语义固定：`0` = 待处理，`> 0` = 已提取页数，`-1` = PDF 损坏。
+6. 索引按「元数据 → PDF 文本 → 向量 → 因子」顺序推进，各阶段可重入、可断点续传；单篇研报失败不得中断整个阶段。
+7. 因子提取对同一篇研报幂等：重跑先清除该研报旧因子与旧向量。
+8. 嵌入模型与 LLM 都是可选依赖：缺失时索引跳过向量阶段、语义检索抛出明确的「不可用」错误，其余功能不受影响。
+9. 因子类型是封闭集合（产能/订单/报价/增速/政策/成本/库存/销量），集合外的因子一律丢弃。
+
+仓库根目录的 `rechunk_and_reindex.py`、`demo_factors.py`、`init_factor_tables.py` 是一次性维护脚本，不属于产品能力面。
+
 ## 目录
 
+- [架构拓扑与模块边界](#架构拓扑与模块边界)
 - [安装](#安装)
 - [配置](#配置)
 - [数据目录结构](#数据目录结构)
@@ -448,7 +502,7 @@ yanbao analyze "新能源补贴退坡影响" --top-k 15
 
 ## MCP Server
 
-yanbao-mcp 实现了 MCP (Model Context Protocol) 服务器，可与 opencode、Claude Desktop 等 MCP 客户端集成。
+yanbao-mcp 实现了 MCP (Model Context Protocol) 服务器，可与 opencode、Claude Desktop 等 MCP 客户端集成。`yanbao serve` 通过标准输入/输出（stdio）与 MCP 客户端通信，需要在客户端配置中注册。
 
 ### 启动
 
@@ -460,7 +514,7 @@ yanbao serve
 
 | 工具名 | 描述 | 主要参数 |
 |---------|-------------|-----------|
-| `search_reports` | 元数据 + 关键词检索 | `query`, `stock_code`, `industry`, `org`, `date_from`, `date_to`, `limit` |
+| `search_reports` | 元数据 + 关键词检索 | `query`, `stock_code`, `stock_name`, `industry`, `org`, `date_from`, `date_to`, `limit` |
 | `semantic_search` | 语义向量搜索 | `query`, `top_k` |
 | `get_report` | 获取单篇研报全文 | `info_code` |
 | `list_by_stock` | 某股票全部研报 | `stock_code`, `limit` |
@@ -471,35 +525,48 @@ yanbao serve
 | `semantic_factor_search` | 语义搜索因子 | `query`, `factor_type`, `top_k` |
 | `get_report_factors` | 获取某研报的所有结构化因子 | `info_code` |
 
-### 集成到 opencode
+### 客户端配置
 
-编辑 `opencode.json`:
-
-```json
-{
-  "mcpServers": {
-    "yanbao": {
-      "command": "yanbao",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-### 集成到 Claude Desktop
-
-编辑 `claude_desktop_config.json`:
+opencode（`~/.config/opencode/mcp.json`）:
 
 ```json
 {
   "mcpServers": {
     "yanbao": {
-      "command": "yanbao",
-      "args": ["serve"]
+      "command": "conda",
+      "args": ["run", "-n", "yanbao", "yanbao", "serve"]
     }
   }
 }
 ```
+
+Claude Desktop（Windows: `%APPDATA%\Claude\claude_desktop_config.json`）:
+
+```json
+{
+  "mcpServers": {
+    "yanbao": {
+      "command": "conda",
+      "args": ["run", "-n", "yanbao", "yanbao", "serve"]
+    }
+  }
+}
+```
+
+VS Code（Settings → Extensions → MCP → Add Server）:
+
+```json
+{
+  "mcp.servers": {
+    "yanbao": {
+      "command": "conda",
+      "args": ["run", "-n", "yanbao", "yanbao", "serve"]
+    }
+  }
+}
+```
+
+若 `yanbao` 命令已在 PATH 中，`command` 可直接写 `yanbao`、`args` 写 `["serve"]`；否则用完整路径（如 `S:\win-apps\Anaconda3\envs\yanbao\Scripts\yanbao.exe`），或先 `conda activate yanbao` 后用 `python -m yanbao.cli serve`。
 
 ---
 
@@ -638,8 +705,8 @@ yanbao index --full --workers 8
 
 ### 提取方式
 
-- **规则提取**（默认）：基于正则表达式从文本中匹配数值+单位+关键字组合，不依赖 LLM，速度快、零外部依赖
-- **LLM 提取**（推荐）：当 `YANBAO_LLM_ENABLED=true` 时，自动调用 LLM 提取，精度更高。LLM 不可用时自动降级为规则提取
+- **规则提取**（索引管线的主路径）：基于正则表达式从文本中匹配数值+单位+关键字组合，不依赖 LLM，速度快、零外部依赖、结果可重复
+- **LLM 提取**（备选能力，索引管线当前不调用）：`yanbao.factor_extractor` 中保留了基于 LLM 的提取函数，精度更高，但目前没有任何命令或管线阶段触发它；启用 LLM 并不会自动改用 LLM 提取因子
 
 ### 搜索因子
 
@@ -698,72 +765,6 @@ yanbao index --full --workers 8
 `YANBAO_DATA_DIR/.download_state.json` 记录已下载的研报，避免重复下载。每次完成 20 篇或间隔 10 秒自动保存。
 
 ---
-
-## MCP Server
-
-`yanbao serve` 启动 MCP 协议服务端，通过标准输入/输出（stdio）与 MCP 客户端通信。需要在客户端配置中注册。
-
-### 可用工具
-
-| 工具名 | 功能 | 参数 |
-|---------|------|------|
-| `search_reports` | 按条件搜索研报 | query, stock_code, stock_name, industry, org, date_from, date_to, limit |
-| `semantic_search` | 语义搜索研报 | query, top_k |
-| `get_report` | 获取单篇研报详情 | info_code |
-| `list_by_stock` | 获取某股票的全量研报 | stock_code, limit |
-| `list_by_industry` | 获取某行业的研报 | industry, limit |
-| `get_stats` | 获取知识库统计 | 无 |
-| `ask` | 基于知识库 RAG 问答 | query, top_k |
-| `search_factors` | 按类型/数值搜索结构化因子 | factor_type, min_value, max_value, unit, limit |
-| `semantic_factor_search` | 语义搜索因子 | query, factor_type, top_k |
-| `get_report_factors` | 获取研报的全部因子 | info_code |
-
-### opencode 配置
-
-`~/.config/opencode/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "yanbao": {
-      "command": "conda",
-      "args": ["run", "-n", "yanbao", "yanbao", "serve"]
-    }
-  }
-}
-```
-
-### Claude Desktop 配置
-
-`claude_desktop_config.json`（Windows: `%APPDATA%\Claude\claude_desktop_config.json`）:
-
-```json
-{
-  "mcpServers": {
-    "yanbao": {
-      "command": "conda",
-      "args": ["run", "-n", "yanbao", "yanbao", "serve"]
-    }
-  }
-}
-```
-
-### VS Code 配置
-
-VS Code 设置 → Extensions → MCP → 添加 Server：
-
-```json
-{
-  "mcp.servers": {
-    "yanbao": {
-      "command": "conda",
-      "args": ["run", "-n", "yanbao", "yanbao", "serve"]
-    }
-  }
-}
-```
-
-> 注意：如果 `yanbao` 命令不在 PATH 中，`command` 使用完整路径（如 `S:\win-apps\Anaconda3\envs\yanbao\Scripts\yanbao.exe`），或先 `conda activate yanbao` 后用 `python -m yanbao.cli serve`。
 
 ---
 
